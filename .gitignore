@@ -22,3 +22,5 @@ frontend/.angular/
 /frontend/.vscode/
 .DS_Store
 *.log
+.neon
+node_modules/

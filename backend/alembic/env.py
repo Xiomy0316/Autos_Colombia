@@ -3,7 +3,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.database import Base, load_database_url
+from app.database import Base, load_migration_database_url
 from app import models  # noqa: F401 - registers models with Base.metadata
 
 config = context.config
@@ -11,8 +11,9 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Misma validación/normalización que en runtime (acepta el `postgres://` heredado
-# que entrega Render y lo convierte a `postgresql+psycopg://`).
-url = load_database_url()
+# que entrega Render). Prefiere DATABASE_URL_UNPOOLED: en Neon las migraciones
+# necesitan la conexión directa, no la del pooler.
+url = load_migration_database_url()
 config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
 target_metadata = Base.metadata
 

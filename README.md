@@ -126,6 +126,37 @@ CREATE DATABASE autos_colombia_app;
 
 El diagrama de relaciones, las reglas de integridad y el flujo de creación de la base están en [docs/modelo-er.md](docs/modelo-er.md).
 
+## Neon (base de datos en la nube)
+
+El proyecto está vinculado a **Neon** con el agente de Neon instalado (`neon` CLI 8.11.3):
+
+| | |
+| --- | --- |
+| Proyecto | `Autos_Colombia` (`lucky-unit-33233478`) |
+| Organización | `org-nameless-field-84769261` |
+| Rama | `production` (`br-falling-leaf-b59qdy9s`) |
+| Región / versión | `aws-us-east-2` · PostgreSQL 18 |
+
+`neon.ts` declara el servicio (`postgres`), `.neon` fija el vínculo y `neon deploy` lo aplica. El despliegue termina escribiendo en `.env` tres variables, que **no se editan a mano**:
+
+| Variable | La usa | Para qué |
+| --- | --- | --- |
+| `DATABASE_URL` | la API (`uvicorn`) | tráfico normal, **a través del pooler** |
+| `DATABASE_URL_UNPOOLED` | Alembic (`run-local.sh`, `backend/Dockerfile`) | migraciones, **conexión directa** |
+| `NEON_BRANCH` | — | rama de la que proceden las anteriores |
+
+La separación no es cosmética: el pooler de Neon trabaja en modo transacción y no conserva el estado de sesión que Alembic necesita, así que una migración por ahí falla de formas que ni mencionan el pooling (por ejemplo `prepared statement "s0" already exists`). `backend/app/database.py` expone `load_database_url()` para la aplicación y `load_migration_database_url()` para Alembic, que prefiere `DATABASE_URL_UNPOOLED` y solo cae a `DATABASE_URL` si aquella no existe (un PostgreSQL local, por ejemplo).
+
+```bash
+neon config plan    # qué cambiaría frente a neon.ts
+neon deploy         # aplica neon.ts y vuelve a tirar las variables a .env
+neon env pull       # solo refrescar las variables, sin aplicar política
+```
+
+El **contenido** de la base local se subió con `pg_dump -Fc` → `pg_restore` sobre `neondb` (55 celdas, 105 compatibilidades, 3 tipos de vehículo, 3 tarifas, 1 parqueadero); `alembic_version` viajó con el volcado, así que Alembic la ve ya en `head`. Para pruebas existe también `autos_colombia_test` en la misma rama.
+
+> Para volver al PostgreSQL local basta con editar `DATABASE_URL` en `.env` (y, si existe, `DATABASE_URL_UNPOOLED`); nada en el código asume Neon.
+
 ## Ejecutar pruebas y compilación
 
 ```bash
@@ -218,6 +249,8 @@ Casi todas las peticiones llevan el parámetro `parking_lot_id`, que es el que m
 ├── PRODUCT.md                    # Alcance, decisiones y reglas de producto
 ├── render.yaml                   # Blueprint de Render: API + interfaz + PostgreSQL
 ├── docker-compose.yml            # Misma arquitectura ejecutada en local
+├── neon.ts                       # Política de Neon: servicio postgres en rama production
+├── package.json                  # Dependencias de neon.ts (@neon/config, @neon/env)
 ├── pyrightconfig.json            # Configuración de análisis Python del proyecto
 ├── .vscode/                      # Ajustes de intérprete y rutas del editor
 ├── backend/
