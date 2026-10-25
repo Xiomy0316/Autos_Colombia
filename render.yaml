@@ -1,0 +1,67 @@
+# =============================================================================
+# Render Blueprint — Autos Colombia
+# -----------------------------------------------------------------------------
+# Dos servicios web independientes (interfaz + API) construidos con Docker y
+# una base de datos PostgreSQL gestionada por Render.
+#
+#   Interfaz (nginx)  ->  https://autos-colombia-web.onrender.com
+#   API (FastAPI)     ->  https://autos-colombia-api.onrender.com
+#
+# El navegador solo habla con la interfaz: nginx hace de reverse proxy de /api
+# hacia la API (variable API_URL), así que no hay CORS ni URLs incrustadas.
+#
+# Docs: https://render.com/docs/blueprint-spec
+# NOTA: Render asigna la variable PORT (por defecto 10000) y enruta a ella;
+#       por eso el esquema del blueprint no admite un campo `port`.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------- API ----
+  - type: web
+    name: autos-colombia-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    region: oregon
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    # Si prefieres desplegar sin fusionar esta rama, descomenta:
+    # branch: docker-render
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: autos-colombia-db
+          property: connectionString
+      # Arranca con un solo proceso: el plan free tiene 512 MB de RAM.
+      - key: WEB_CONCURRENCY
+        value: "1"
+
+  # ------------------------------------------------------------ Interfaz ----
+  - type: web
+    name: autos-colombia-web
+    runtime: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    region: oregon
+    plan: free
+    healthCheckPath: /
+    autoDeploy: true
+    # Si prefieres desplegar sin fusionar esta rama, descomenta:
+    # branch: docker-render
+    envVars:
+      # Origen del backend hacia el que nginx proxya /api. SOLO el origen,
+      # sin barra final. Si cambias el nombre del servicio, cámbialo aquí.
+      - key: API_URL
+        value: https://autos-colombia-api.onrender.com
+
+# --------------------------------------------------------------- Datos -----
+databases:
+  - name: autos-colombia-db
+    databaseName: autos_colombia
+    user: autos_colombia
+    region: oregon
+    postgresMajorVersion: "17"
+    plan: free
+    # Sin ipAllowList -> cualquier origen puede conectarse (es el valor por
+    # defecto). Añade una lista vacía ([]) si solo quieres conexiones internas.

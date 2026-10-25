@@ -1,0 +1,11 @@
+# Contexto de construcción del frontend
+.git
+.gitignore
+.vscode
+node_modules/
+dist/
+.angular/
+coverage/
+*.log
+.env
+.env.*

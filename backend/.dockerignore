@@ -1,0 +1,17 @@
+# Contexto de construcción del backend
+.git
+.gitignore
+.vscode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+*.db
+*.sqlite3
+tests/
+README.md
+.env
+.env.*

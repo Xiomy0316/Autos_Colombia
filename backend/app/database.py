@@ -17,6 +17,10 @@ def load_database_url() -> str:
             "DATABASE_URL no está definida. Este proyecto usa únicamente PostgreSQL: "
             "copia .env.example a .env, completa la conexión y vuelve a iniciar."
         )
+    # Render y Heroku entregan el esquema heredado `postgres://`; SQLAlchemy 2
+    # ya no lo admite, así que se normaliza al driver `psycopg`.
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://"):]
     if not url.startswith(POSTGRESQL_PREFIXES):
         scheme = url.split(":", 1)[0]
         raise RuntimeError(

@@ -2,6 +2,8 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import type { Observable } from 'rxjs';
 
+import { environment } from '../environments/environment';
+
 export interface VehicleType { id: number; code: string; name: string; }
 export interface ParkingLot { id: number; name: string; tax_id: string | null; }
 export interface ParkingLotSummary {
@@ -96,7 +98,8 @@ export interface Report {
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = 'http://127.0.0.1:8000/api';
+  /** En desarrollo apunta a la API local; en producción a `/api` (nginx). */
+  private readonly base = environment.apiUrl;
   private activeLotId = 1;
 
   setParkingLot(id: number): void { this.activeLotId = id; }

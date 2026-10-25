@@ -1,19 +1,18 @@
 from logging.config import fileConfig
-import os
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.database import Base
+from app.database import Base, load_database_url
 from app import models  # noqa: F401 - registers models with Base.metadata
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-url = os.environ["DATABASE_URL"]
-if not url.startswith(("postgresql://", "postgresql+")):
-    raise RuntimeError("Alembic espera una DATABASE_URL de PostgreSQL.")
+# Misma validación/normalización que en runtime (acepta el `postgres://` heredado
+# que entrega Render y lo convierte a `postgresql+psycopg://`).
+url = load_database_url()
 config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
 target_metadata = Base.metadata
 

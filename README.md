@@ -31,6 +31,7 @@ La capacidad se calcula a partir de las celdas operativas configuradas; no está
 | Migraciones de esquema | Alembic |
 | Base de datos | PostgreSQL 14 o superior (probado con PostgreSQL 17) |
 | Driver Python | `psycopg` 3 |
+| Despliegue | Docker (nginx como reverse proxy) y Render Blueprint |
 
 ## Requisitos
 
@@ -38,6 +39,7 @@ La capacidad se calcula a partir de las celdas operativas configuradas; no está
 - Python 3.12 o superior (probado con Python 3.13).
 - Node.js 22.12 o superior y npm.
 - Bash: `bash` en Linux/macOS o **Git Bash** en Windows (viene con Git para Windows). También funciona en WSL.
+- **Docker (opcional)**: solo para levantar todo con `docker compose` o para construir las imágenes que despliega Render. Desarrollar con `run-local.sh` no lo necesita.
 
 ## Ejecutar con `run-local.sh`
 
@@ -149,7 +151,47 @@ Las pruebas derivan de tu `DATABASE_URL` una base propia, `autos_colombia_test`,
 CREATE DATABASE autos_colombia_test;
 ```
 
-Las pruebas usan `backend/autos_colombia_test.db`, también fuera del repositorio.
+> Los ficheros `backend/autos_colombia.db` y `backend/autos_colombia_test.db` son restos de la etapa con SQLite. El proyecto ya no los usa y puedes borrarlos; además `.gitignore` los mantiene fuera del repositorio.
+
+## Desplegar con Docker y Render
+
+La rama `docker-render` empaqueta el proyecto como **dos servicios independientes** más una base gestionada:
+
+| Servicio | Fichero | Escucha en | Contenido |
+| --- | --- | --- | --- |
+| `autos-colombia-api` | `backend/Dockerfile` | `0.0.0.0:${PORT}` | FastAPI + uvicorn; ejecuta `alembic upgrade head` antes de aceptar tráfico |
+| `autos-colombia-web` | `frontend/Dockerfile` | `0.0.0.0:${PORT}` | nginx con el bundle de Angular y reverse proxy de `/api` |
+| `autos-colombia-db` | `render.yaml` | 5432 | PostgreSQL 17 gestionado por Render |
+
+El navegador solo habla con la interfaz. El build de producción reemplaza `environment.ts` por `environment.prod.ts`, que fija la API en `/api`, y nginx la reenvía al backend con la variable `API_URL`. El desarrollo local no cambia: `ng serve` sigue usando `http://127.0.0.1:8000/api`. Como la interfaz y la API comparten origen en producción, además desaparece la necesidad de CORS.
+
+### En local (opcional)
+
+```bash
+docker compose up --build
+# Interfaz: http://localhost:8080  ·  API: http://localhost:8000/api/health
+```
+
+Levanta PostgreSQL, la API y la interfaz con la misma arquitectura que en Render. Si prefieres trabajar como hasta ahora con `ng serve` y `uvicorn`, sigue usando `./run-local.sh`: no hace falta Docker para desarrollar.
+
+### En Render
+
+1. Sube la rama y conecta el repositorio en Render: **New → Blueprint**.
+2. Elige el repositorio y la rama. Render lee `render.yaml` y crea los tres recursos.
+3. Espera a que los tres queden en estado *Live*. La API se comprueba en `/api/health` y la interfaz en `/`.
+
+Si quieres probar sin fusionar a `main`, descomenta la línea `branch: docker-render` en cada servicio de `render.yaml`. Recuerda volver a dejarla comentada tras la fusión para que los despliegues automáticos sigan a la rama por defecto.
+
+### Ajustes habituales
+
+- **Plan.** `render.yaml` usa el plan `free` en servicios y base de datos. Conviene conocer sus límites: los servicios se duermen a los 15 minutos sin tráfico (y tardan ~1 minuto en despertar), hay 750 horas de instancia al mes por espacio de trabajo —no alcanzan para dos servicios 24/7— y **las bases gratuitas caducan a los 30 días**. Para algo siempre encendido, cambia `plan: free` por `plan: starter` (unos 7 USD por servicio y mes).
+- **Puerto.** Render asigna `PORT` (10000 por defecto) y enruta a ese puerto; por eso los dos contenedores escuchan en `${PORT}`. El esquema del blueprint no admite un campo `port`.
+- **`API_URL`.** Debe ser solo el origen del backend, sin barra final (`https://autos-colombia-api.onrender.com`). Si renombras el servicio de la API, actualízalo aquí.
+- **`DATABASE_URL`.** Render entrega la conexión con el esquema heredado `postgres://`; `app/database.py` y `alembic/env.py` lo normalizan a `postgresql+psycopg://`, así que no hace falta tocar nada.
+
+### Limitación de esta rama
+
+En este equipo **no hay Docker instalado**, por lo que los Dockerfiles, el `docker-compose.yml` y el `render.yaml` se han verificado de forma estática (sintaxis YAML, contraste con el esquema oficial del blueprint, rutas de `COPY`, resolución de la plantilla de nginx y build de producción de Angular), pero **no se han ejecutado los builds de imagen**. El primer `docker compose up --build` o despliegue en Render puede requerir ajustes menores.
 
 ## API
 
@@ -174,6 +216,8 @@ Casi todas las peticiones llevan el parámetro `parking_lot_id`, que es el que m
 ├── .env.example                  # Plantilla de conexión a PostgreSQL (copia a .env)
 ├── README.md                     # Esta guía de instalación y uso
 ├── PRODUCT.md                    # Alcance, decisiones y reglas de producto
+├── render.yaml                   # Blueprint de Render: API + interfaz + PostgreSQL
+├── docker-compose.yml            # Misma arquitectura ejecutada en local
 ├── pyrightconfig.json            # Configuración de análisis Python del proyecto
 ├── .vscode/                      # Ajustes de intérprete y rutas del editor
 ├── backend/
@@ -185,6 +229,8 @@ Casi todas las peticiones llevan el parámetro `parking_lot_id`, que es el que m
 │   ├── alembic/                  # Configuración e historial de migraciones
 │   │   └── versions/             # Migraciones versionadas del esquema
 │   ├── tests/                    # Pruebas del flujo de negocio
+│   ├── Dockerfile                # Imagen de la API (migraciones + uvicorn)
+│   ├── .dockerignore             # Excluye venv, cachés y pruebas del contexto
 │   ├── requirements.txt          # Dependencias Python
 │   └── pyrightconfig.json        # Configuración de tipos del backend
 ├── frontend/
@@ -193,8 +239,12 @@ Casi todas las peticiones llevan el parámetro `parking_lot_id`, que es el que m
 │   │   ├── app.html              # Plantilla de pantallas y formularios
 │   │   ├── app.scss              # Estilos y diseño adaptable
 │   │   └── api.service.ts        # Comunicación HTTP con FastAPI
+│   ├── src/environments/         # URL de la API por entorno (dev / producción)
+│   ├── nginx/templates/          # Plantilla de nginx (proxy de ${API_URL})
 │   ├── public/icons/             # Iconos SVG locales (sin CDN)
 │   ├── README.md                 # Sistema de diseño y tokens de la interfaz
+│   ├── Dockerfile                # Imagen de la interfaz (Angular + nginx)
+│   ├── .dockerignore             # Excluye node_modules y dist del contexto
 │   ├── angular.json              # Configuración de Angular
 │   └── package.json              # Dependencias y comandos npm
 └── docs/
