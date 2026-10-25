@@ -28,7 +28,7 @@
 ## Requisitos no funcionales
 
 - RNF-01 Integridad: claves foráneas, unicidad y transacción al registrar ingresos.
-- RNF-02 Portabilidad: SQLite para desarrollo; PostgreSQL seleccionable mediante `DATABASE_URL`.
+- RNF-02 Portabilidad: PostgreSQL mediante `DATABASE_URL`; no existe respaldo en SQLite.
 - RNF-03 Facilidad de uso: interfaz Angular en español, usable en escritorio y móvil.
 - RNF-04 Disponibilidad local: API documentada con OpenAPI/Swagger.
 - RNF-05 Trazabilidad: preservar movimientos y pagos, sin borrar el registro por cada salida.

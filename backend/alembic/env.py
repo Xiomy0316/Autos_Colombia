@@ -11,7 +11,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-url = os.getenv("DATABASE_URL", "sqlite:///./autos_colombia.db")
+url = os.environ["DATABASE_URL"]
+if not url.startswith(("postgresql://", "postgresql+")):
+    raise RuntimeError("Alembic espera una DATABASE_URL de PostgreSQL.")
 config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
 target_metadata = Base.metadata
 
@@ -23,7 +25,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
-        render_as_batch=url.startswith("sqlite"),
+        render_as_batch=False,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -40,7 +42,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
-            render_as_batch=connection.dialect.name == "sqlite",
+            render_as_batch=False,
         )
         with context.begin_transaction():
             context.run_migrations()

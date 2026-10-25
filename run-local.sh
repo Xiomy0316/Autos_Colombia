@@ -37,6 +37,26 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Conexión a PostgreSQL: se lee de .env (no forma parte del repositorio).
+# Copia .env.example a .env y completa usuario, clave y base de datos.
+if [[ -f "$ROOT/.env" ]]; then
+	set -a
+	# shellcheck disable=SC1091
+	source "$ROOT/.env"
+	set +a
+fi
+
+if [[ -z "${DATABASE_URL:-}" ]]; then
+	echo "DATABASE_URL no está definida." >&2
+	echo "Copia .env.example a .env, completa la conexión de PostgreSQL y vuelve a ejecutar." >&2
+	exit 1
+fi
+
+if [[ "$DATABASE_URL" != postgresql* ]]; then
+	echo "Este proyecto usa únicamente PostgreSQL; DATABASE_URL debe empezar por postgresql+psycopg://." >&2
+	exit 1
+fi
+
 # Detectar Python
 if command -v python3 >/dev/null 2>&1; then
     PYTHON_CMD=(python3)

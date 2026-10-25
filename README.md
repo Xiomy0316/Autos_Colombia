@@ -1,6 +1,6 @@
 # Autos Colombia · Gestión de parqueaderos
 
-Aplicación web para administrar la operación de uno o varios parqueaderos: clientes, vehículos, inventario configurable de celdas, mensualidades, pagos, entradas, salidas e historial de novedades. El repositorio incluye una interfaz Angular, una API FastAPI, una base local SQLite y migraciones Alembic.
+Aplicación web para administrar la operación de uno o varios parqueaderos: clientes, vehículos, inventario configurable de celdas, mensualidades, pagos, entradas, salidas e historial de novedades. El repositorio incluye una interfaz Angular, una API FastAPI, una base **PostgreSQL** y migraciones Alembic.
 
 > **Versión local de demostración:** no incluye autenticación ni autorización. No la expongas en Internet ni ingreses información personal real.
 
@@ -29,11 +29,12 @@ La capacidad se calcula a partir de las celdas operativas configuradas; no está
 | API | FastAPI y Pydantic |
 | Modelos y acceso a datos | SQLAlchemy 2 |
 | Migraciones de esquema | Alembic |
-| Base local | SQLite |
-| Base prevista para despliegue | PostgreSQL, seleccionable con `DATABASE_URL` |
+| Base de datos | PostgreSQL 14 o superior (probado con PostgreSQL 17) |
+| Driver Python | `psycopg` 3 |
 
 ## Requisitos
 
+- **PostgreSQL 14 o superior** con una base de datos creada y sus credenciales a la mano. El proyecto **no funciona con SQLite**: no existe ningún respaldo local.
 - Python 3.12 o superior (probado con Python 3.13).
 - Node.js 22.12 o superior y npm.
 - Bash: `bash` en Linux/macOS o **Git Bash** en Windows (viene con Git para Windows). También funciona en WSL.
@@ -51,7 +52,21 @@ La capacidad se calcula a partir de las celdas operativas configuradas; no está
 
    En Windows no es necesario.
 
-3. Inicia la aplicación:
+3. Crea el archivo de conexión a partir de la plantilla y complétalo:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Abre `.env` y escribe tu usuario, clave y nombre de base:
+
+   ```dotenv
+   DATABASE_URL=postgresql+psycopg://postgres:tu_clave@127.0.0.1:5432/autos_colombia_app
+   ```
+
+   `.env` está en `.gitignore`: nunca se sube al repositorio. Si prefieres, puedes exportar `DATABASE_URL` en la terminal en lugar de usar el archivo.
+
+4. Inicia la aplicación:
 
    ```bash
    ./run-local.sh
@@ -83,39 +98,36 @@ La demostración **no** siembra empleados ni turnos: la pantalla *Empleados y tu
 - **No carga la página o dice que no conecta con el parqueadero:** deja la terminal abierta y confirma que los dos servidores arrancaron. Comprueba la API en <http://127.0.0.1:8000/api/health>.
 - **Aparece un aviso de actualización de pip:** es informativo y no impide ejecutar la aplicación.
 - **`npm ci` falla o pide una versión de Node diferente:** instala Node.js 22.12 o superior y vuelve a ejecutar el script.
+- **`DATABASE_URL no está definida`:** falta el archivo `.env`. Copia `.env.example` a `.env` y completa la conexión.
+- **`DATABASE_URL debe apuntar a PostgreSQL`:** la variable apunta a otro motor. Solo se admite `postgresql+psycopg://`.
+- **`no existe la base de datos ...`:** créala antes de iniciar, por ejemplo `createdb autos_colombia_app`, o corrige el nombre en `.env`.
 
 ## Base de datos y persistencia
 
-Por defecto se usa SQLite con `DATABASE_URL=sqlite:///./autos_colombia.db`. Como el backend se inicia desde `backend/`, el archivo de datos queda en `backend/autos_colombia.db`. Está excluido del control de versiones para conservar localmente los datos de prueba.
+El proyecto usa **PostgreSQL exclusivamente**. La conexión vive en `DATABASE_URL` y se lee desde `.env` (o desde la terminal); si falta o apunta a otro motor, el backend no arranca.
 
-Alembic aplica el esquema versionado desde `backend/alembic/versions/`. La API agrega datos de demostración solo si la base todavía no contiene parqueaderos. Para borrar y volver a generar **todos** los datos locales, detén la aplicación y elimina `backend/autos_colombia.db`; al siguiente inicio se reconstruirá la base de demostración.
+```bash
+createdb autos_colombia_app        # desde psql: CREATE DATABASE autos_colombia_app;
+./run-local.sh
+```
+
+Alembic aplica el esquema versionado desde `backend/alembic/versions/` sobre esa base. La API agrega datos de demostración solo si la base todavía no contiene parqueaderos.
+
+Para **reiniciar desde cero**, borra la base y déjala vacía; al siguiente inicio Alembic vuelve a crear el esquema y la API siembra la demostración:
+
+```sql
+DROP DATABASE autos_colombia_app;
+CREATE DATABASE autos_colombia_app;
+```
+
+> `backend/autos_colombia.db` es un archivo **heredado de una versión anterior con SQLite**. Ya no se usa: el proyecto no lo abre. Puedes conservarlo como respaldo o eliminarlo.
 
 El diagrama de relaciones, las reglas de integridad y el flujo de creación de la base están en [docs/modelo-er.md](docs/modelo-er.md).
-
-### Usar PostgreSQL en vez de SQLite
-
-El backend selecciona el motor mediante `DATABASE_URL`. Después de crear el entorno local con `./run-local.sh`, instala el driver y exporta la conexión antes de iniciar el script:
-
-```bash
-# Linux / macOS
-backend/.venv/bin/python -m pip install 'psycopg[binary]'
-export DATABASE_URL='postgresql+psycopg://usuario:clave@localhost:5432/autos_colombia'
-./run-local.sh
-```
-
-```bash
-# Windows (Git Bash)
-backend/.venv/Scripts/python.exe -m pip install 'psycopg[binary]'
-export DATABASE_URL='postgresql+psycopg://usuario:clave@localhost:5432/autos_colombia'
-./run-local.sh
-```
-
-La migración y la API usarán esa misma conexión. No se usa PostgREST: FastAPI es la API y PostgreSQL es el motor de base de datos.
 
 ## Ejecutar pruebas y compilación
 
 ```bash
-# Pruebas del backend (desde backend/, para que la base de pruebas quede en su carpeta)
+# Pruebas del backend
 cd backend
 
 # Linux / macOS
@@ -129,6 +141,12 @@ cd ..
 # Compilar el frontend (requiere node_modules: ya los crea run-local.sh)
 cd frontend
 npm run build
+```
+
+Las pruebas derivan de tu `DATABASE_URL` una base propia, `autos_colombia_test`, y la vacían antes y después de cada prueba: **también corren en PostgreSQL** y nunca tocan tus datos reales. Crea esa base una sola vez:
+
+```sql
+CREATE DATABASE autos_colombia_test;
 ```
 
 Las pruebas usan `backend/autos_colombia_test.db`, también fuera del repositorio.
@@ -153,6 +171,7 @@ Casi todas las peticiones llevan el parámetro `parking_lot_id`, que es el que m
 ```text
 .
 ├── run-local.sh                  # Prepara dependencias, migra la BD e inicia la app
+├── .env.example                  # Plantilla de conexión a PostgreSQL (copia a .env)
 ├── README.md                     # Esta guía de instalación y uso
 ├── PRODUCT.md                    # Alcance, decisiones y reglas de producto
 ├── pyrightconfig.json            # Configuración de análisis Python del proyecto
@@ -162,7 +181,7 @@ Casi todas las peticiones llevan el parámetro `parking_lot_id`, que es el que m
 │   │   ├── main.py               # API REST, reglas de operación y datos demo
 │   │   ├── models.py             # Entidades/tablas SQLAlchemy y relaciones
 │   │   ├── schemas.py            # Esquemas de entrada/salida y validación
-│   │   └── database.py           # DATABASE_URL, motor, sesiones y SQLite
+│   │   └── database.py           # DATABASE_URL, motor y sesiones de PostgreSQL
 │   ├── alembic/                  # Configuración e historial de migraciones
 │   │   └── versions/             # Migraciones versionadas del esquema
 │   ├── tests/                    # Pruebas del flujo de negocio

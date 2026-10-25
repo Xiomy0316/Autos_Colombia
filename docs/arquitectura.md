@@ -8,13 +8,11 @@ flowchart LR
     UI -->|HTTP + JSON| API[FastAPI · API REST]
     API --> DOM[Servicios y reglas de negocio]
     DOM --> ORM[SQLAlchemy 2]
-    ORM --> DB[(SQLite local)]
-    ORM -. mismo modelo, otra URL .-> PG[(PostgreSQL despliegue)]
+    ORM --> DB[(PostgreSQL)]
     MIG[Alembic · migraciones] --> DB
-    MIG -.-> PG
 ```
 
-Se utiliza un monolito modular, no microservicios. La API es la única responsable de validar operaciones y conectar con la base de datos. Angular no se conecta directamente con SQLite/PostgreSQL.
+Se utiliza un monolito modular, no microservicios. La API es la única responsable de validar operaciones y conectar con la base de datos. Angular no se conecta directamente con PostgreSQL.
 
 ## Flujo de ingreso
 
@@ -53,8 +51,8 @@ AutosColombia
 
 ## Configuración de datos
 
-- `DATABASE_URL` cambia el motor sin alterar los modelos.
-- SQLite local está habilitado con claves foráneas.
+- `DATABASE_URL` apunta a PostgreSQL (`postgresql+psycopg://...`) y se lee desde `.env`.
+- Si `DATABASE_URL` falta o no es de PostgreSQL, el backend no arranca: no existe respaldo en otro motor.
 - Alembic crea/migra el esquema.
 - El primer arranque crea el inventario de prueba. En un parqueadero nuevo no se precargan celdas: se deben agregar según el conteo físico.
 - Las operaciones de ingreso validan estados en el servidor y además existen índices únicos parciales que protegen la celda y el vehículo ante solicitudes simultáneas.

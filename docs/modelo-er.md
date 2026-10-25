@@ -193,18 +193,16 @@ flowchart LR
     API --> Validacion[Esquemas Pydantic]
     API --> ORM[Modelos SQLAlchemy 2]
     ORM --> Sesion[Engine y SessionLocal]
-    Sesion -->|DATABASE_URL local| SQLite[(SQLite<br/>backend/autos_colombia.db)]
-    Sesion -. alternativa de despliegue .-> PostgreSQL[(PostgreSQL)]
+    Sesion -->|DATABASE_URL (.env)| PostgreSQL[(PostgreSQL)]
 
     CodigoModelos[backend/app/models.py] --> Metadata[Metadatos SQLAlchemy]
     Metadata --> Alembic[Alembic: migraciones versionadas]
-    Alembic --> SQLite
-    Alembic -. misma migración .-> PostgreSQL
+    Alembic --> PostgreSQL
 
     Inicio[run-local.sh] --> Migracion[alembic upgrade head]
     Migracion --> API
     API --> Seed[Inicialización de datos demo<br/>solo si no hay parqueaderos]
-    Seed --> SQLite
+    Seed --> PostgreSQL
 ```
 
 ### Arranque paso a paso
@@ -214,13 +212,13 @@ flowchart LR
 3. Inicia FastAPI y Angular. Al iniciar, la API crea las tablas que falten y agrega datos **de demostración** solo cuando la base no tiene parqueaderos.
 4. SQLAlchemy abre sesiones y lee/escribe en el motor indicado por `DATABASE_URL`.
 
-Configuración por defecto:
+Configuración de la conexión (archivo `.env`, no versionado):
 
-```text
-DATABASE_URL=sqlite:///./autos_colombia.db
+```dotenv
+DATABASE_URL=postgresql+psycopg://postgres:tu_clave@127.0.0.1:5432/autos_colombia_app
 ```
 
-Como el servidor se inicia desde `backend/`, el archivo local queda en `backend/autos_colombia.db`. Para PostgreSQL se configura la misma variable con una URL `postgresql+psycopg://...`; no hay que cambiar el modelo relacional.
+La misma variable configura la base de datos; el modelo relacional no cambia. Si falta o apunta a otro motor, el backend se detiene con un mensaje claro en lugar de crear un respaldo alternativo.
 
 ## 3. Reglas e integridad
 
@@ -230,7 +228,7 @@ Como el servidor se inicia desde `backend/`, el archivo local queda en `backend/
 - `UNIQUE(zone_id, code)` evita códigos de celda repetidos dentro de una zona.
 - `cell_vehicle_types` materializa la relación muchos-a-muchos entre celdas y tipos de vehículo mediante una clave primaria compuesta. Una celda compatible con varios tipos sigue siendo un solo espacio físico.
 - Índices únicos parciales en `movements` permiten como máximo un movimiento activo por vehículo y por celda; un movimiento activo es aquel cuyo `exited_at` es `NULL`.
-- En SQLite se habilitan las claves foráneas con `PRAGMA foreign_keys=ON`.
+- PostgreSQL aplica las claves foráneas de forma nativa en cada operación.
 - La capacidad no es un número fijo: se obtiene del inventario de celdas activas. La ocupación se deriva de movimientos activos, no se almacena duplicada en la celda.
 - `employees.shift_id` es opcional: una persona puede estar registrada sin turno asignado. Los turnos (`shifts`) pertenecen al parqueadero y definen el horario de referencia del equipo.
 - Tarifas y pagos guardan vigencias e importes aplicados para conservar el historial cuando se actualice una tarifa. Al crear una vigencia se cierra la anterior el día anterior a su inicio; el solapamiento entre periodos ya cerrados se rechaza.

@@ -8,7 +8,7 @@ web
 
 ## Stack
 
-delegated: Angular frontend, FastAPI backend, SQLAlchemy/Alembic, SQLite for local development, PostgreSQL for deployment.
+delegated: Angular frontend, FastAPI backend, SQLAlchemy/Alembic, PostgreSQL for local development and deployment.
 
 ## Users
 

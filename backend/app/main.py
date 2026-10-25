@@ -329,7 +329,7 @@ def dashboard(parking_lot_id: int | None = None, db: Session = Depends(get_db)) 
     today_payments = db.execute(
         select(func.coalesce(func.sum(Payment.amount), 0), func.count(Payment.id))
         .join(MonthlyContract).join(Vehicle)
-        .where(Vehicle.parking_lot_id == lot_id, func.date(Payment.paid_at) == today.isoformat())
+        .where(Vehicle.parking_lot_id == lot_id, func.date(Payment.paid_at) == today)
     ).one()
     return {
         "parking_lot_id": lot_id,
