@@ -144,3 +144,20 @@ En pantallas de hasta 900px la media query revierte el comportamiento: `.app-she
 ## Límites de la prueba local
 
 No hay autenticación de usuarios ni autorización por roles en esta primera versión. Los campos de empleado existen en el modelo, pero la interfaz no identifica al operador. Añadir login, gestión de empleados y auditoría firmada es condición previa para producción con datos personales.
+
+## Despliegue (Docker y Render)
+
+En el entorno de desarrollo la interfaz (`ng serve`) habla directo con la API (`http://127.0.0.1:8000/api`). En despliegue la topología cambia: los dos procesos corren en servicios separados y el navegador solo contacta con la interfaz.
+
+```mermaid
+flowchart LR
+    N[Navegador] -->|GET / y /api/...| NG[nginx · autos-colombia-web]
+    NG -->|proxy de /api hacia API_URL| API[uvicorn · autos-colombia-api]
+    API --> DB[(PostgreSQL · autos-colombia-db)]
+    MIG[Alembic al arrancar] --> API
+```
+
+- **Enlaces:** `frontend/Dockerfile` (Angular 22 → nginx), `backend/Dockerfile` (migraciones + uvicorn), `render.yaml` (blueprint con los dos servicios y la base) y `docker-compose.yml` (la misma topología en local).
+- **URL de la API:** el build de producción reemplaza `environment.ts` por `environment.prod.ts`, que fija la raíz en `/api`; nginx la reenvía al origen indicado por `API_URL`. No hay CORS porque comparten origen.
+- **Puerto:** ambos contenedores escuchan en `0.0.0.0:${PORT}`, la variable que inyecta Render (10000 por defecto).
+- **Migraciones:** el contenedor de la API ejecuta `alembic upgrade head` antes de aceptar tráfico, de modo que cada despliegue parte de un esquema actualizado.
