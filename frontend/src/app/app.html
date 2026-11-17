@@ -105,15 +105,15 @@
         </div>
       }
 
-      @if (page !== 'history') {
+      @if (page !== 'history' && page !== 'payments-register') {
       <div class="page-route">
-        <span class="route-path">{{ pageMeta[page].ruta }}</span>
+        <span class="route-path">{{ pageRoute }}</span>
         <span class="route-date">{{ formatLongDate(today) }}</span>
       </div>
 
       <div class="page-header">
         <div class="page-heading">
-          <h1>{{ pageMeta[page].titulo }}</h1>
+          <h1>{{ pageTitle }}</h1>
           <p class="page-context">{{ pageContext }}</p>
         </div>
         <div class="page-actions">
@@ -129,7 +129,7 @@
               </button>
             }
             @case ('cells') {
-              <button class="button button-primary" type="button" (click)="openCellDialog()">
+              <button class="button button-primary" type="button" (click)="openCreateCell()">
                 <img src="/icons/plus.svg" alt="" width="16" height="16" />
                 <span>Crear celda</span>
               </button>
@@ -183,6 +183,12 @@
               <button class="button button-primary" type="button" (click)="openEmployeeDialog()">
                 <img src="/icons/user-plus.svg" alt="" width="16" height="16" />
                 <span>Agregar empleado</span>
+              </button>
+            }
+            @case ('users') {
+              <button class="button button-primary" type="button" (click)="openCreateUser()">
+                <img src="/icons/user-plus.svg" alt="" width="16" height="16" />
+                <span>Crear cuenta</span>
               </button>
             }
             @case ('reports') {
@@ -1888,7 +1894,388 @@
       }
 
       @if (page === 'cells') {
+        <nav class="tab-bar" aria-label="Secciones de ocupación y celdas">
+          <button
+            type="button"
+            class="tab-item"
+            [class.tab-item--active]="cellsTab === 'inventory'"
+            (click)="setCellsTab('inventory')"
+          >
+            Inventario y capacidad
+          </button>
+          <button
+            type="button"
+            class="tab-item"
+            [class.tab-item--active]="cellsTab === 'map'"
+            (click)="setCellsTab('map')"
+          >
+            Mapa de ocupación
+          </button>
+          <button
+            type="button"
+            class="tab-item"
+            [class.tab-item--active]="cellsTab === 'registration'"
+            (click)="setCellsTab('registration')"
+          >
+            Registro y configuración
+          </button>
+        </nav>
+      }
+
+      @if (page === 'cells' && cellsTab === 'inventory') {
         <section class="indicators" aria-label="Indicadores de inventario">
+          <article class="indicator">
+            <div class="indicator-head">
+              <span>Capacidad total</span>
+              <img src="/icons/chart-no-axes-column.svg" alt="" width="16" height="16" />
+            </div>
+            <div class="indicator-value">{{ cellsInventory }}</div>
+            <div class="indicator-caption">Inventario físico · {{ inventoryZoneCount }} zonas</div>
+          </article>
+          <article class="indicator">
+            <div class="indicator-head">
+              <span>Ocupadas</span>
+              <img src="/icons/chart-no-axes-column.svg" alt="" width="16" height="16" />
+            </div>
+            <div class="indicator-value">{{ dashboard?.cells_occupied ?? 0 }}</div>
+            <div class="indicator-caption">
+              {{ formatPercent(occupancyRate) }} de ocupación física
+            </div>
+          </article>
+          <article class="indicator">
+            <div class="indicator-head">
+              <span>Disponibles</span>
+              <img src="/icons/chart-no-axes-column.svg" alt="" width="16" height="16" />
+            </div>
+            <div class="indicator-value">{{ dashboard?.cells_available ?? 0 }}</div>
+            <div class="indicator-caption">{{ inventoryAvailableByGroup }}</div>
+          </article>
+          <article class="indicator">
+            <div class="indicator-head">
+              <span>Mantenimiento</span>
+              <img src="/icons/chart-no-axes-column.svg" alt="" width="16" height="16" />
+            </div>
+            <div class="indicator-value">{{ dashboard?.cells_maintenance ?? 0 }}</div>
+            <div class="indicator-caption">{{ inventoryMaintenanceNote }}</div>
+          </article>
+        </section>
+
+        <section class="map-filters inv-filters" aria-label="Filtros del inventario">
+          <label class="map-search">
+            <img src="/icons/search.svg" alt="" width="16" height="16" />
+            <input
+              type="search"
+              placeholder="Buscar por código o placa"
+              aria-label="Buscar por código o placa"
+              [(ngModel)]="invDraft.search"
+              (keyup.enter)="applyInvFilters()"
+            />
+          </label>
+
+          <label class="map-filter map-filter--site">
+            <select
+              aria-label="Filtrar por sede"
+              [ngModel]="invDraft.site_id"
+              (ngModelChange)="changeInvSite($event)"
+            >
+              <option [ngValue]="0">Todas las sedes</option>
+              @for (site of sites; track site.id) {
+                <option [ngValue]="site.id">{{ site.name }}</option>
+              }
+            </select>
+            <img src="/icons/chevron-down.svg" alt="" width="13" height="13" />
+          </label>
+
+          <label class="map-filter map-filter--zone">
+            <select
+              aria-label="Filtrar por zona"
+              [ngModel]="invDraft.zone_id"
+              (ngModelChange)="invDraft.zone_id = $event"
+            >
+              <option [ngValue]="0">Todas las zonas</option>
+              @for (zone of invZoneOptions; track zone.id) {
+                <option [ngValue]="zone.id">{{ zone.name }}</option>
+              }
+            </select>
+            <img src="/icons/chevron-down.svg" alt="" width="13" height="13" />
+          </label>
+
+          <label class="map-filter map-filter--status">
+            <select
+              aria-label="Filtrar por estado"
+              [ngModel]="invDraft.status"
+              (ngModelChange)="invDraft.status = $event"
+            >
+              <option [ngValue]="''">Todos los estados</option>
+              <option [ngValue]="'free'">Disponible</option>
+              <option [ngValue]="'busy'">Ocupada</option>
+              <option [ngValue]="'maintenance'">Mantenimiento</option>
+            </select>
+            <img src="/icons/chevron-down.svg" alt="" width="13" height="13" />
+          </label>
+
+          <label class="map-filter map-filter--type">
+            <select
+              aria-label="Filtrar por tipo de vehículo"
+              [ngModel]="invDraft.type_id"
+              (ngModelChange)="invDraft.type_id = $event"
+            >
+              <option [ngValue]="0">Todos los tipos</option>
+              @for (type of vehicleTypes; track type.id) {
+                <option [ngValue]="type.id">{{ type.name }}</option>
+              }
+            </select>
+            <img src="/icons/chevron-down.svg" alt="" width="13" height="13" />
+          </label>
+
+          <div class="inv-filter-actions">
+            <button class="button button-primary" type="button" (click)="applyInvFilters()">
+              Aplicar filtros
+            </button>
+            <button class="button button-secondary" type="button" (click)="clearInvFilters()">
+              Limpiar
+            </button>
+          </div>
+        </section>
+
+        <div class="inv-layout">
+          <section class="panel inv-table-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Inventario de celdas</h2>
+                <p>{{ activeSiteName }}</p>
+              </div>
+            </div>
+
+            <div class="data-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Código</th>
+                    <th>Zona</th>
+                    <th>Estado</th>
+                    <th>Vehículo</th>
+                    <th>Tipos compatibles</th>
+                    <th>Última modificación</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (celda of inventoryRows; track celda.id) {
+                    <tr
+                      class="inv-row"
+                      [class.inv-row--selected]="celda.id === invCell?.id"
+                      (click)="selectInvCell(celda)"
+                    >
+                      <td><strong>{{ celda.code }}</strong></td>
+                      <td>{{ celda.zone_name }}</td>
+                      <td>
+                        <span
+                          class="map-pill"
+                          [class.map-pill--free]="cellStatus(celda) === 'free'"
+                          [class.map-pill--busy]="cellStatus(celda) === 'busy'"
+                          [class.map-pill--maintenance]="cellStatus(celda) === 'maintenance'"
+                        >
+                          {{ cellStatusLabel(celda) }}
+                        </span>
+                      </td>
+                      <td>{{ celda.vehicle_plate ?? '—' }}</td>
+                      <td>{{ cellTypesSlash(celda) }}</td>
+                      <td>
+                        @if (invLastChange(celda); as fecha) {
+                          {{ fecha | date: 'd MMM y' : '' : 'es-CO' }}
+                          <span class="cell-sub">{{ fecha | date: 'h:mm a' : '' : 'es-CO' }}</span>
+                        } @else {
+                          Sin movimientos previos
+                        }
+                      </td>
+                      <td>
+                        <button
+                          class="link-button"
+                          type="button"
+                          (click)="$event.stopPropagation(); editCellFromInventory(celda)"
+                        >
+                          Editar →
+                        </button>
+                      </td>
+                    </tr>
+                  } @empty {
+                    <tr>
+                      <td colspan="7">
+                        <div class="table-empty">
+                          <img src="/icons/square-parking-ink.svg" alt="" width="16" height="16" />
+                          <span>
+                            No hay celdas que coincidan con los filtros. Ajusta la búsqueda o
+                            limpia los filtros.
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+
+            @if (inventoryCells.length) {
+              <div class="pagination">
+                <span class="pagination-summary">{{ inventorySummary }}</span>
+                <div class="pagination-controls">
+                  <button
+                    type="button"
+                    class="pagination-step"
+                    [disabled]="invPage === 1"
+                    (click)="goInvPage(invPage - 1)"
+                  >
+                    Anterior
+                  </button>
+                  @for (number of inventoryPages; track number) {
+                    <button
+                      type="button"
+                      class="pagination-page"
+                      [class.current]="number === invPage"
+                      (click)="goInvPage(number)"
+                    >
+                      {{ number }}
+                    </button>
+                  }
+                  <button
+                    type="button"
+                    class="pagination-step"
+                    [disabled]="invPage === inventoryTotalPages"
+                    (click)="goInvPage(invPage + 1)"
+                  >
+                    Siguiente →
+                  </button>
+                </div>
+              </div>
+            }
+          </section>
+
+          <aside class="inv-side">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Capacidad por zona</h2>
+                  <p>{{ activeSiteName }} · Inventario base</p>
+                </div>
+              </div>
+              <div class="data-table">
+                <table class="inv-capacity">
+                  <thead>
+                    <tr>
+                      <th>Zona</th>
+                      <th>Total</th>
+                      <th>Ocupadas</th>
+                      <th>Disponibles</th>
+                      <th>Mantenimiento</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (fila of zoneCapacityRows; track fila.name) {
+                      <tr>
+                        <td><strong>{{ fila.name }}</strong></td>
+                        <td>{{ fila.total }}</td>
+                        <td>{{ fila.occupied }}</td>
+                        <td>{{ fila.available }}</td>
+                        <td>{{ fila.maintenance }}</td>
+                      </tr>
+                    } @empty {
+                      <tr>
+                        <td colspan="5">
+                          <div class="table-empty">
+                            <img
+                              src="/icons/square-parking-ink.svg"
+                              alt=""
+                              width="16"
+                              height="16"
+                            />
+                            <span>Sin celdas registradas en esta sede.</span>
+                          </div>
+                        </td>
+                      </tr>
+                    }
+                    @if (zoneCapacityRows.length) {
+                      <tr class="inv-capacity-total">
+                        <td><strong>Total</strong></td>
+                        <td><strong>{{ zoneCapacityTotal.total }}</strong></td>
+                        <td><strong>{{ zoneCapacityTotal.occupied }}</strong></td>
+                        <td><strong>{{ zoneCapacityTotal.available }}</strong></td>
+                        <td><strong>{{ zoneCapacityTotal.maintenance }}</strong></td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel map-detail-panel">
+              <h2 class="map-detail-title">Consulta de celda</h2>
+              @if (invCell; as celda) {
+                <span
+                  class="map-pill"
+                  [class.map-pill--free]="cellStatus(celda) === 'free'"
+                  [class.map-pill--busy]="cellStatus(celda) === 'busy'"
+                  [class.map-pill--maintenance]="cellStatus(celda) === 'maintenance'"
+                >
+                  {{ cellStatusLabel(celda) }}
+                </span>
+                <p class="map-detail-row">
+                  <span>Código</span>
+                  <strong>{{ celda.code }}</strong>
+                </p>
+                <p class="map-detail-row">
+                  <span>Zona / sede</span>
+                  <strong>{{ celda.zone_name }} / {{ celda.site_name }}</strong>
+                </p>
+                <p class="map-detail-row">
+                  <span>Compatibilidad</span>
+                  <strong>{{ cellCompatibility(celda) }}</strong>
+                </p>
+                <p class="map-detail-row">
+                  <span>Observación</span>
+                  <strong>{{ celda.description || 'Sin observación' }}</strong>
+                </p>
+                <div class="map-detail-divider"></div>
+                @if (vehicleOf(celda); as vehiculo) {
+                  <p class="map-detail-plate">{{ vehiculo.plate }}</p>
+                  <p class="map-detail-vehicle">
+                    {{ vehiculo.brand }} · {{ vehiculo.color }} · {{ vehiculo.type_name }}
+                  </p>
+                  <p class="map-detail-row">
+                    <span>Propietario</span>
+                    <strong>{{ vehiculo.customer_name }}</strong>
+                  </p>
+                  @if (movementOf(celda); as movimiento) {
+                    <p class="map-detail-row">
+                      <span>Ingreso</span>
+                      <strong>
+                        {{ movimiento.entered_at | date: 'd MMM · h:mm a' : '' : 'es-CO' }}
+                      </strong>
+                    </p>
+                  }
+                } @else {
+                  <p class="map-detail-empty">Celda libre. Sin vehículo asignado.</p>
+                }
+              } @else {
+                <p class="map-detail-empty">
+                  Selecciona una celda del listado para consultar su detalle.
+                </p>
+              }
+            </section>
+          </aside>
+        </div>
+
+        <div class="context-note">
+          <strong>Ocupación vinculada a movimientos</strong>
+          <span>
+            El estado de cada celda se deriva de los movimientos activos y de los cambios
+            operativos registrados con responsable, motivo y fecha/hora.
+          </span>
+        </div>
+      }
+
+      @if (page === 'cells' && cellsTab === 'map') {
+        <section class="indicators" aria-label="Indicadores de ocupación">
           <article class="indicator">
             <div class="indicator-head">
               <span>Total físico</span>
@@ -2009,7 +2396,7 @@
                         (click)="selectMapCell(cell)"
                       >
                         <strong>{{ cell.code }}</strong>
-                        <span>{{ mapCellStateLabel(cell) }}</span>
+                        <span>{{ cellStatusLabel(cell) }}</span>
                       </button>
                     }
                   </div>
@@ -2037,7 +2424,7 @@
                         (click)="selectMapCell(cell)"
                       >
                         <strong>{{ cell.code }}</strong>
-                        <span>{{ mapCellStateLabel(cell) }}</span>
+                        <span>{{ cellStatusLabel(cell) }}</span>
                       </button>
                     }
                   </div>
@@ -2159,56 +2546,100 @@
           </aside>
         </section>
 
-        <div class="context-note">
-          <strong>! Capacidad por confirmar</strong>
-          <span>{{ demoInventoryNote }}</span>
+      }
+
+      @if (page === 'cells' && cellsTab === 'registration') {
+        <div class="reg-intro">
+          <strong>Formularios conectados a la API</strong>
+          <span>
+            Cada panel opera sobre el inventario real de {{ cellCreateSiteName }}. Los cambios se
+            guardan en la base de datos y quedan registrados con responsable, motivo y fecha/hora.
+          </span>
         </div>
 
-        <p class="page-footer">
-          Autos Colombia · {{ parkingName }} · Datos ficticios de demostración · Solo mensualidades
-          · COP
-        </p>
+        <section class="reg-grid">
+          <!-- 1 · Crear celda -->
+          <article class="panel reg-panel">
+            <p class="reg-kicker">Alta · Nueva celda</p>
+            <div class="panel-head">
+              <div>
+                <h2>Crear celda</h2>
+                <p>Cada código debe ser único dentro de su zona.</p>
+              </div>
+            </div>
 
-        @if (cellDialogOpen) {
-          <div class="dialog-backdrop" (click)="closeCellDialog()">
-            <section
-              class="dialog-card"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="createCellTitle"
-              (click)="$event.stopPropagation()"
-            >
-              <div class="panel-head">
-                <div>
-                  <h2 id="createCellTitle">Crear celda</h2>
-                  <p>Cada código debe ser único dentro de su zona.</p>
-                </div>
+            @if (cellCreateNotice) {
+              <p class="reg-notice reg-notice--ok">
+                {{ cellCreateNotice }}
+                <span>Inventario actual: {{ inventorySummaryCounts }}</span>
+              </p>
+            }
+
+            <form class="stack-form" (ngSubmit)="addCell()">
+              <div class="campo" [class.campo--error]="!!cellCreateErrors.site">
+                <label for="cellCreateSite">Sede *</label>
+                <select
+                  id="cellCreateSite"
+                  name="cellCreateSite"
+                  [ngModel]="cellForm.site_id"
+                  (ngModelChange)="changeCellFormSite($event)"
+                >
+                  <option [ngValue]="0">— Selecciona —</option>
+                  @for (site of sites; track site.id) {
+                    <option [ngValue]="site.id">{{ site.name }}</option>
+                  }
+                </select>
+                @if (cellCreateErrors.site) {
+                  <span class="field-hint field-hint--error">{{ cellCreateErrors.site }}</span>
+                }
               </div>
 
-              <form class="stack-form" (ngSubmit)="addCell()" #cellNgForm="ngForm">
-                <div class="campo">
-                  <label for="cellZone">Zona</label>
-                  <select id="cellZone" name="cellZone" required [(ngModel)]="cellForm.zone_id">
-                    <option [ngValue]="0">Seleccionar zona…</option>
-                    @for (zone of zones; track zone.id) {
-                      <option [ngValue]="zone.id">{{ zone.name }}</option>
-                    }
-                  </select>
-                </div>
-                <div class="campo">
-                  <label for="cellCode">Código de celda</label>
-                  <input
-                    id="cellCode"
-                    name="cellCode"
-                    required
-                    placeholder="Ej. C-081"
-                    [(ngModel)]="cellForm.code"
-                  />
-                </div>
-                <fieldset class="type-options">
-                  <legend>Vehículos permitidos</legend>
+              <div class="campo" [class.campo--error]="!!cellCreateErrors.zone">
+                <label for="cellCreateZone">Zona *</label>
+                <select
+                  id="cellCreateZone"
+                  name="cellCreateZone"
+                  [ngModel]="cellForm.zone_id"
+                  (ngModelChange)="cellForm.zone_id = $event"
+                >
+                  <option [ngValue]="0">— Selecciona —</option>
+                  @for (zone of cellFormZoneOptions; track zone.id) {
+                    <option [ngValue]="zone.id">{{ zone.name }}</option>
+                  }
+                </select>
+                @if (cellCreateErrors.zone) {
+                  <span class="field-hint field-hint--error">{{ cellCreateErrors.zone }}</span>
+                } @else {
+                  <span class="field-hint">La zona define el bloque de códigos de la sede.</span>
+                }
+              </div>
+
+              <div class="campo" [class.campo--error]="!!cellCreateErrors.code">
+                <label for="cellCreateCode">Código de celda *</label>
+                <input
+                  id="cellCreateCode"
+                  name="cellCreateCode"
+                  placeholder="Ej. A-036"
+                  maxlength="30"
+                  [(ngModel)]="cellForm.code"
+                />
+                @if (cellCreateErrors.code) {
+                  <span class="field-hint field-hint--error">{{ cellCreateErrors.code }}</span>
+                } @else if (cellCreateServerCodeError) {
+                  <span class="field-hint field-hint--error">{{ cellCreateServerCodeError }}</span>
+                } @else {
+                  <span class="field-hint">Se guarda en mayúsculas; único por zona.</span>
+                }
+              </div>
+
+              <fieldset class="type-options" [class.campo--error]="!!cellCreateErrors.types">
+                <legend>Tipos compatibles *</legend>
+                <div class="type-chips">
                   @for (type of vehicleTypes; track type.id) {
-                    <label class="check-option">
+                    <label
+                      class="type-chip"
+                      [class.type-chip--on]="cellForm.compatible_type_ids.includes(type.id)"
+                    >
                       <input
                         type="checkbox"
                         [checked]="cellForm.compatible_type_ids.includes(type.id)"
@@ -2217,41 +2648,366 @@
                       <span>{{ type.name }}</span>
                     </label>
                   }
-                </fieldset>
-                <button
-                  class="button button-primary"
-                  type="submit"
-                  [disabled]="
-                    cellNgForm.invalid || !cellForm.zone_id || !cellForm.compatible_type_ids.length
-                  "
-                >
-                  Agregar al inventario
+                </div>
+                @if (cellCreateErrors.types) {
+                  <span class="field-hint field-hint--error">{{ cellCreateErrors.types }}</span>
+                }
+              </fieldset>
+
+              <div class="campo">
+                <label for="cellCreateDesc">Observación</label>
+                <input
+                  id="cellCreateDesc"
+                  name="cellCreateDesc"
+                  placeholder="Opcional · máx. 200 caracteres"
+                  maxlength="200"
+                  [(ngModel)]="cellForm.description"
+                />
+                <span class="field-hint">Visible para el equipo al consultar la celda.</span>
+              </div>
+
+              <div class="reg-actions">
+                <button class="button button-primary" type="submit">
+                  Crear celda{{ cellForm.code ? ' ' + cellForm.code : '' }}
                 </button>
+                <button class="button button-secondary" type="button" (click)="openCreateCell()">
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </article>
+
+          <!-- 2 · Editar celda -->
+          <article class="panel reg-panel">
+            <p class="reg-kicker">{{ cellEditKicker }}</p>
+            <div class="panel-head">
+              <div>
+                <h2>Editar celda</h2>
+                <p>{{ cellEditContext }}</p>
+              </div>
+            </div>
+
+            @if (cellEditNotice) {
+              <p class="reg-notice reg-notice--ok">{{ cellEditNotice }}</p>
+            }
+
+            <div class="campo">
+              <label for="cellEditPick">Celda a editar</label>
+              <select
+                id="cellEditPick"
+                name="cellEditPick"
+                [ngModel]="cellEditId"
+                (ngModelChange)="changeCellEdit($event)"
+              >
+                <option [ngValue]="0">— Selecciona —</option>
+                @for (celda of configurableCells; track celda.id) {
+                  <option [ngValue]="celda.id">{{ cellOptionLabel(celda) }}</option>
+                }
+              </select>
+            </div>
+
+            @if (!cellEditCell) {
+              <p class="map-detail-empty">Selecciona una celda para editarla.</p>
+            } @else if (cellEditBlocked) {
+              <p class="reg-notice reg-notice--warn">
+                No puedes editar una celda ocupada. Registra primero la salida del vehículo.
+              </p>
+            } @else {
+              <form class="stack-form" (ngSubmit)="saveCellEdit()">
+                <div class="campo" [class.campo--error]="!!cellEditErrors.zone">
+                  <label for="cellEditZone">Zona *</label>
+                  <select
+                    id="cellEditZone"
+                    name="cellEditZone"
+                    [ngModel]="cellEditForm.zone_id"
+                    (ngModelChange)="cellEditForm.zone_id = $event"
+                  >
+                    <option [ngValue]="0">— Selecciona —</option>
+                    @for (zone of cellEditZoneOptions; track zone.id) {
+                      <option [ngValue]="zone.id">{{ zone.name }}</option>
+                    }
+                  </select>
+                  @if (cellEditErrors.zone) {
+                    <span class="field-hint field-hint--error">{{ cellEditErrors.zone }}</span>
+                  }
+                </div>
+
+                <div class="campo" [class.campo--error]="!!cellEditErrors.code">
+                  <label for="cellEditCode">Código de celda *</label>
+                  <input
+                    id="cellEditCode"
+                    name="cellEditCode"
+                    maxlength="30"
+                    [(ngModel)]="cellEditForm.code"
+                  />
+                  @if (cellEditErrors.code) {
+                    <span class="field-hint field-hint--error">{{ cellEditErrors.code }}</span>
+                  } @else if (cellEditServerCodeError) {
+                    <span class="field-hint field-hint--error">{{ cellEditServerCodeError }}</span>
+                  }
+                </div>
+
+                <fieldset class="type-options" [class.campo--error]="!!cellEditErrors.types">
+                  <legend>Tipos compatibles *</legend>
+                  <div class="type-chips">
+                    @for (type of vehicleTypes; track type.id) {
+                      <label
+                        class="type-chip"
+                        [class.type-chip--on]="cellEditForm.compatible_type_ids.includes(type.id)"
+                      >
+                        <input
+                          type="checkbox"
+                          [checked]="cellEditForm.compatible_type_ids.includes(type.id)"
+                          (change)="toggleEditCompatible(type.id, $event)"
+                        />
+                        <span>{{ type.name }}</span>
+                      </label>
+                    }
+                  </div>
+                  @if (cellEditErrors.types) {
+                    <span class="field-hint field-hint--error">{{ cellEditErrors.types }}</span>
+                  }
+                </fieldset>
+
+                <div class="campo">
+                  <label for="cellEditDesc">Observación</label>
+                  <input
+                    id="cellEditDesc"
+                    name="cellEditDesc"
+                    placeholder="Opcional · máx. 200 caracteres"
+                    maxlength="200"
+                    [(ngModel)]="cellEditForm.description"
+                  />
+                </div>
+
+                <div class="reg-actions">
+                  <button class="button button-primary" type="submit">
+                    Guardar cambios de {{ cellEditCell?.code }}
+                  </button>
+                  <button
+                    class="button button-secondary"
+                    type="button"
+                    (click)="changeCellEdit(cellEditId)"
+                  >
+                    Cancelar edición
+                  </button>
+                </div>
+              </form>
+            }
+          </article>
+
+          <!-- 3 · Pasar a mantenimiento -->
+          <article class="panel reg-panel">
+            <p class="reg-kicker">Cambio operativo · Disponible → Mantenimiento</p>
+            <div class="panel-head">
+              <div>
+                <h2>Pasar a mantenimiento</h2>
+                <p>{{ cellMaintContext }}</p>
+              </div>
+            </div>
+
+            @if (cellMaintNotice) {
+              <p class="reg-notice reg-notice--ok">
+                {{ cellMaintNotice }}
+                <span>Inventario actual: {{ inventorySummaryCounts }}</span>
+              </p>
+            }
+
+            <div class="campo">
+              <label for="cellMaintPick">Celda</label>
+              <select
+                id="cellMaintPick"
+                name="cellMaintPick"
+                [ngModel]="cellMaintId"
+                (ngModelChange)="changeCellMaint($event)"
+              >
+                <option [ngValue]="0">— Selecciona —</option>
+                @for (celda of configurableCells; track celda.id) {
+                  <option [ngValue]="celda.id">{{ cellOptionLabel(celda) }}</option>
+                }
+              </select>
+            </div>
+
+            @if (cellMaintCell; as celda) {
+              <span
+                class="map-pill"
+                [class.map-pill--free]="cellStatus(celda) === 'free'"
+                [class.map-pill--busy]="cellStatus(celda) === 'busy'"
+                [class.map-pill--maintenance]="cellStatus(celda) === 'maintenance'"
+              >
+                {{ cellMaintBadge }}
+              </span>
+
+              <form class="stack-form" (ngSubmit)="confirmCellMaintenance()">
+                <div
+                  class="campo"
+                  [class.campo--error]="cellMaintAttempted && !cellMaintReason.trim()"
+                >
+                  <label for="cellMaintReason">Motivo *</label>
+                  <input
+                    id="cellMaintReason"
+                    name="cellMaintReason"
+                    placeholder="Ej. Pintura de la franja y señalización"
+                    maxlength="240"
+                    [(ngModel)]="cellMaintReason"
+                  />
+                  @if (cellMaintAttempted && !cellMaintReason.trim()) {
+                    <span class="field-hint field-hint--error">El motivo es obligatorio.</span>
+                  } @else {
+                    <span class="field-hint">Si está vacío, no se confirma el cambio.</span>
+                  }
+                </div>
+
+                <div class="reg-note reg-note--warn">
+                  <strong>La celda dejará de ser asignable</strong>
+                  <span>
+                    Confirma el cambio solo si la celda sigue disponible. La operación quedará
+                    registrada con responsable, motivo y fecha/hora.
+                  </span>
+                </div>
+
+                <div class="reg-actions">
+                  <button class="button button-primary" type="submit" [disabled]="!cellMaintReady">
+                    Confirmar mantenimiento
+                  </button>
+                  <button
+                    class="button button-secondary"
+                    type="button"
+                    (click)="changeCellMaint(cellMaintId)"
+                  >
+                    Cancelar
+                  </button>
+                </div>
               </form>
 
-              <div class="dialog-section">
-                <h3 class="dialog-section-title">Capacidad por tipo</h3>
-                <p class="dialog-section-note">
-                  Una celda compatible con varios tipos se muestra en cada categoría, pero cuenta
-                  una sola vez en el total físico.
+              @if (cellMaintBlockNote) {
+                <p class="reg-notice reg-notice--warn">{{ cellMaintBlockNote }}</p>
+              }
+              @if (cellMaintLast; as ultimo) {
+                <p class="reg-last">
+                  Último cambio ·
+                  {{ ultimo.to_status === 'ACTIVE' ? 'Disponible' : 'Mantenimiento' }} ·
+                  {{ ultimo.actor }} · {{ ultimo.created_at | date: 'd MMM y · h:mm a' : '' : 'es-CO' }}
+                  <span>{{ ultimo.reason || 'Sin motivo registrado' }}</span>
                 </p>
-                @for (type of vehicleTypes; track type.id) {
-                  <div class="type-capacity-row">
-                    <span class="type-dot" [class.type-moto]="type.code === 'MOTO'"></span>
-                    <div>
-                      <strong>{{ type.name }}</strong>
-                      <small>
-                        {{ typeCapacity(type.code).occupied }} ocupadas ·
-                        {{ typeCapacity(type.code).available }} libres
-                      </small>
-                    </div>
-                    <strong>{{ typeCapacity(type.code).total }}</strong>
-                  </div>
-                }
+              }
+            } @else {
+              <p class="map-detail-empty">Selecciona una celda para continuar.</p>
+            }
+          </article>
+
+          <!-- 4 · Devolver a disponible -->
+          <article class="panel reg-panel">
+            <p class="reg-kicker">Cambio operativo · Mantenimiento → Disponible</p>
+            <div class="panel-head">
+              <div>
+                <h2>Devolver a disponible</h2>
+                <p>{{ cellFreeContext }}</p>
               </div>
-            </section>
-          </div>
-        }
+            </div>
+
+            @if (cellFreeNotice) {
+              <p class="reg-notice reg-notice--ok">
+                {{ cellFreeNotice }}
+                <span>Inventario actual: {{ inventorySummaryCounts }}</span>
+              </p>
+            }
+
+            <div class="campo">
+              <label for="cellFreePick">Celda</label>
+              <select
+                id="cellFreePick"
+                name="cellFreePick"
+                [ngModel]="cellFreeId"
+                (ngModelChange)="changeCellFree($event)"
+              >
+                <option [ngValue]="0">— Selecciona —</option>
+                @for (celda of configurableCells; track celda.id) {
+                  <option [ngValue]="celda.id">{{ cellOptionLabel(celda) }}</option>
+                }
+              </select>
+            </div>
+
+            @if (cellFreeCell; as celda) {
+              <span
+                class="map-pill"
+                [class.map-pill--free]="cellStatus(celda) === 'free'"
+                [class.map-pill--busy]="cellStatus(celda) === 'busy'"
+                [class.map-pill--maintenance]="cellStatus(celda) === 'maintenance'"
+              >
+                {{ cellFreeBadge }}
+              </span>
+
+              <form class="stack-form" (ngSubmit)="confirmCellAvailable()">
+                <div
+                  class="campo"
+                  [class.campo--error]="cellFreeAttempted && !cellFreeReason.trim()"
+                >
+                  <label for="cellFreeReason">Motivo del retorno *</label>
+                  <input
+                    id="cellFreeReason"
+                    name="cellFreeReason"
+                    placeholder="Ej. Mantenimiento finalizado y vía liberada"
+                    maxlength="240"
+                    [(ngModel)]="cellFreeReason"
+                  />
+                  @if (cellFreeAttempted && !cellFreeReason.trim()) {
+                    <span class="field-hint field-hint--error">El motivo es obligatorio.</span>
+                  } @else {
+                    <span class="field-hint">Si está vacío, no se confirma el retorno.</span>
+                  }
+                </div>
+
+                <div class="reg-note reg-note--info">
+                  <strong>La celda volverá a ser asignable</strong>
+                  <span>
+                    Confirma que la revisión terminó. La operación quedará registrada con
+                    responsable, motivo y fecha/hora.
+                  </span>
+                </div>
+
+                <div class="reg-actions">
+                  <button class="button button-primary" type="submit" [disabled]="!cellFreeReady">
+                    Confirmar disponible
+                  </button>
+                  <button
+                    class="button button-secondary"
+                    type="button"
+                    (click)="changeCellFree(cellFreeId)"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+
+              @if (cellFreeBlockNote) {
+                <p class="reg-notice reg-notice--warn">{{ cellFreeBlockNote }}</p>
+              }
+              @if (cellFreeLast; as ultimo) {
+                <p class="reg-last">
+                  Último cambio ·
+                  {{ ultimo.to_status === 'ACTIVE' ? 'Disponible' : 'Mantenimiento' }} ·
+                  {{ ultimo.actor }} · {{ ultimo.created_at | date: 'd MMM y · h:mm a' : '' : 'es-CO' }}
+                  <span>{{ ultimo.reason || 'Sin motivo registrado' }}</span>
+                </p>
+              }
+            } @else {
+              <p class="map-detail-empty">Selecciona una celda para continuar.</p>
+            }
+          </article>
+        </section>
+
+        <div class="context-note">
+          <strong>! Capacidad por confirmar</strong>
+          <span>{{ demoInventoryNote }}</span>
+        </div>
+      }
+
+      @if (page === 'cells') {
+        <p class="page-footer">
+          Autos Colombia · {{ parkingName }} · Datos ficticios de demostración · Solo mensualidades
+          · COP
+        </p>
       }
 
       @if (page === 'history') {
@@ -2975,7 +3731,7 @@
                 <button class="button button-secondary" type="button" (click)="navigate('cells')">
                   <span>Editar inventario</span>
                 </button>
-                <button class="button button-primary" type="button" (click)="openCellDialog()">
+                <button class="button button-primary" type="button" (click)="openCreateCell()">
                   <img src="/icons/plus.svg" alt="" width="16" height="16" />
                   <span>Crear celda</span>
                 </button>
@@ -3818,6 +4574,1040 @@
         }
       }
 
+      @if (page === 'users') {
+        <nav class="tab-bar" aria-label="Secciones del módulo de usuarios">
+          <button
+            type="button"
+            class="tab-item"
+            [class.tab-item--active]="userTab === 'directory'"
+            (click)="userTab = 'directory'"
+          >
+            Directorio de usuarios
+          </button>
+          <button
+            type="button"
+            class="tab-item"
+            [class.tab-item--active]="userTab === 'status'"
+            (click)="userTab = 'status'"
+          >
+            Estado y permisos
+          </button>
+          <button
+            type="button"
+            class="tab-item"
+            [class.tab-item--active]="userTab === 'activity'"
+            (click)="userTab = 'activity'"
+          >
+            Actividad administrativa
+          </button>
+        </nav>
+
+        @if (userTab === 'directory') {
+          @if (userFormBanner) {
+            <div
+              class="message"
+              [class.message--success]="userFormBanner.kind === 'success'"
+              [class.message--error]="userFormBanner.kind === 'error'"
+              role="status"
+            >
+              <p class="message-title">{{ userFormBanner.title }}</p>
+              <p class="message-body">{{ userFormBanner.body }}</p>
+              <button class="link-button" type="button" (click)="dismissUserBanner()">
+                Descartar aviso
+              </button>
+            </div>
+          }
+
+          <section class="stat-grid" aria-label="Indicadores de cuentas de acceso">
+            @for (stat of userStats; track stat.label) {
+              <article class="stat-card">
+                <span class="stat-label">{{ stat.label }}</span>
+                <strong class="stat-value">{{ stat.value }}</strong>
+                <span class="stat-hint">{{ stat.hint }}</span>
+              </article>
+            }
+          </section>
+
+          <div class="message message--info">
+            <p class="message-title">Empleado registrado ≠ cuenta de acceso</p>
+            <p class="message-body">
+              El registro laboral conserva los datos del empleado. La cuenta define su usuario
+              único, rol y estado. Crear una cuenta no registra un empleado nuevo.
+            </p>
+          </div>
+
+          <form class="filter-bar user-filters" (ngSubmit)="applyUserFilters()">
+            <div class="filter-field filter-field--grow">
+              <label for="userSearch">Buscar empleado o cuenta</label>
+              <label class="filter-search">
+                <img src="/icons/search.svg" alt="" width="16" height="16" />
+                <input
+                  id="userSearch"
+                  name="userSearch"
+                  type="search"
+                  placeholder="Nombre, documento o usuario"
+                  [(ngModel)]="userFilters.search"
+                />
+              </label>
+            </div>
+            <div class="filter-field">
+              <label for="userRole">Rol</label>
+              <label class="filter-select">
+                <select id="userRole" name="userRole" [(ngModel)]="userFilters.role">
+                  <option value="">Todos los roles</option>
+                  @for (role of userRoles; track role.id) {
+                    <option [value]="role.code">{{ role.name }}</option>
+                  }
+                </select>
+                <img src="/icons/chevron-down.svg" alt="" width="13" height="13" />
+              </label>
+            </div>
+            <div class="filter-field">
+              <label for="userStatus">Estado</label>
+              <label class="filter-select">
+                <select id="userStatus" name="userStatus" [(ngModel)]="userFilters.status">
+                  <option value="ALL">Todos los estados</option>
+                  <option value="ACTIVE">Activas</option>
+                  <option value="INACTIVE">Inactivas</option>
+                </select>
+                <img src="/icons/chevron-down.svg" alt="" width="13" height="13" />
+              </label>
+            </div>
+            <div class="filter-field filter-field--action">
+              <span aria-hidden="true">&nbsp;</span>
+              <button class="button button-primary" type="submit">Buscar</button>
+            </div>
+          </form>
+
+          @if (filteredUsers.length) {
+            <section class="data-table" aria-label="Cuentas de acceso">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Empleado</th>
+                    <th>Documento</th>
+                    <th>Usuario único</th>
+                    <th>Rol</th>
+                    <th>Estado</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (row of pagedUsers; track row.id) {
+                    <tr [class.row--selected]="row.id === selectedUserId">
+                      <td>
+                        <strong>{{ row.employee_name }}</strong>
+                        @if (row.username === actorUsername) {
+                          <span class="row-tag">Actúa ahora</span>
+                        }
+                      </td>
+                      <td>CC · {{ row.document_number }}</td>
+                      <td>{{ row.username }}</td>
+                      <td>{{ roleLabel(row) }}</td>
+                      <td>
+                        <span
+                          class="status-pill"
+                          [class.status-pill--ok]="row.active"
+                          [class.status-pill--warn]="!row.active"
+                        >
+                          {{ row.active ? '● Activo' : '○ Inactivo' }}
+                        </span>
+                      </td>
+                      <td>
+                        <span class="table-actions">
+                          <button class="table-link" type="button" (click)="selectUser(row.id)">
+                            Consultar
+                          </button>
+                          <span class="table-sep">·</span>
+                          <button
+                            class="table-link"
+                            type="button"
+                            (click)="openUserForm('edit', row)"
+                          >
+                            Editar
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </section>
+
+            <div class="pagination">
+              <span class="pagination-summary">{{ userDirectorySummary }}</span>
+              <div class="pagination-controls">
+                <button
+                  type="button"
+                  class="pagination-step"
+                  [disabled]="userPage === 1"
+                  (click)="goToUserPage(userPage - 1)"
+                >
+                  ‹
+                </button>
+                <span class="pagination-page current">Página {{ userPage }} de {{ userTotalPages }}</span>
+                <button
+                  type="button"
+                  class="pagination-step"
+                  [disabled]="userPage === userTotalPages"
+                  (click)="goToUserPage(userPage + 1)"
+                >
+                  ›
+                </button>
+              </div>
+            </div>
+          } @else {
+            <section class="panel empty-search">
+              <div class="panel-head">
+                <div>
+                  <h2>No encontramos usuarios</h2>
+                </div>
+                <span class="panel-kicker">Directorio · Búsqueda sin coincidencias</span>
+              </div>
+              <form class="empty-search-grid" (ngSubmit)="applyUserFilters()">
+                <div class="empty-search-form">
+                  <div class="campo">
+                    <label for="emptyUserSearch">Nombre, documento o usuario</label>
+                    <input
+                      id="emptyUserSearch"
+                      name="emptyUserSearch"
+                      type="search"
+                      placeholder="Nombre, documento o usuario"
+                      [(ngModel)]="userFilters.search"
+                    />
+                  </div>
+                  <span class="filter-chip">{{ userFilterSummary }}</span>
+                </div>
+                <div class="empty-search-copy">
+                  <p>No hay cuentas que coincidan con tu búsqueda.</p>
+                  <p>
+                    Revisa el nombre, documento o usuario; también puedes quitar los filtros. Crear
+                    acceso requiere un empleado previamente registrado.
+                  </p>
+                  <div class="panel-actions">
+                    <button class="button button-secondary" type="button" (click)="clearUserFilters()">
+                      Limpiar filtros
+                    </button>
+                    <button class="button button-primary" type="submit">Nueva búsqueda</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+          }
+
+          <div class="users-split">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Consultar cuenta</h2>
+                </div>
+                <span class="panel-kicker">Solo lectura · Cuenta seleccionada</span>
+              </div>
+              @if (selectedUser; as account) {
+                <div class="account-head">
+                  <div>
+                    <strong>{{ account.employee_name }}</strong>
+                    <span>CC · {{ account.document_number }}</span>
+                  </div>
+                  <span
+                    class="status-pill"
+                    [class.status-pill--ok]="account.active"
+                    [class.status-pill--warn]="!account.active"
+                  >
+                    {{ account.active ? '● Activo' : '○ Inactivo' }}
+                  </span>
+                </div>
+                <div class="data-rows">
+                  <p><span>Usuario</span> <strong>{{ account.username }}</strong></p>
+                  <p>
+                    <span>Rol</span>
+                    <strong>{{ roleLabel(account) }} · {{ parkingName }}</strong>
+                  </p>
+                </div>
+                <p class="panel-note">{{ roleDescription(account) }}</p>
+                <p class="panel-note">Las contraseñas no se muestran en la consulta.</p>
+                <div class="panel-actions">
+                  <button
+                    class="button button-secondary"
+                    type="button"
+                    (click)="openUserForm('edit', account)"
+                  >
+                    Editar cuenta
+                  </button>
+                  <button
+                    class="button button-secondary button--danger"
+                    type="button"
+                    (click)="requestUserStatusChange(account, !account.active)"
+                  >
+                    {{ account.active ? 'Desactivar…' : 'Activar…' }}
+                  </button>
+                </div>
+              } @else {
+                <p class="panel-note">
+                  Todavía no hay cuentas de acceso en este parqueadero. Crea la primera desde el
+                  directorio.
+                </p>
+                <div class="panel-actions">
+                  <button class="button button-primary" type="button" (click)="openCreateUser()">
+                    Crear cuenta
+                  </button>
+                </div>
+              }
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Empleados registrados sin cuenta</h2>
+                </div>
+                <span class="panel-kicker">Registro laboral · Sin acceso</span>
+              </div>
+              <section class="data-table" aria-label="Empleados sin cuenta de acceso">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Empleado</th>
+                      <th>Documento</th>
+                      <th>Acción</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (employee of employeesWithoutAccount; track employee.id) {
+                      <tr>
+                        <td><strong>{{ employee.full_name }}</strong></td>
+                        <td>CC · {{ employee.document_number }}</td>
+                        <td>
+                          <button
+                            class="table-link"
+                            type="button"
+                            (click)="openCreateUser(employee)"
+                          >
+                            Crear cuenta
+                          </button>
+                        </td>
+                      </tr>
+                    } @empty {
+                      <tr>
+                        <td colspan="3">
+                          <div class="table-empty">
+                            <img src="/icons/user-plus.svg" alt="" width="16" height="16" />
+                            <span>
+                              @if (employees.length) {
+                                Todos los empleados de {{ parkingName }} ya tienen una cuenta de
+                                acceso.
+                              } @else {
+                                Aún no hay empleados registrados en este parqueadero.
+                              }
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </section>
+              @if (employeesWithoutAccount.length) {
+                <p class="panel-note">
+                  {{ employeesWithoutAccount[0].full_name }} ya figura en el registro laboral. Aún
+                  no tiene usuario, rol ni credenciales de acceso.
+                </p>
+              }
+              <p class="panel-note">
+                Si no encuentras al empleado, regístralo primero en Empleados y turnos.
+              </p>
+              <button class="link-button" type="button" (click)="navigate('employees')">
+                Ir a Empleados y turnos →
+              </button>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Actividad administrativa reciente</h2>
+              </div>
+              <span class="panel-kicker">Últimos {{ recentUserActivity.length }} movimientos</span>
+            </div>
+            @if (usersPermissionError && !userActivity.length) {
+              <div class="message message--warning">
+                <p class="message-title">! Bitácora restringida</p>
+                <p class="message-body">{{ usersPermissionError }}</p>
+              </div>
+            } @else {
+              <section class="data-table" aria-label="Actividad administrativa reciente">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Fecha / hora</th>
+                      <th>Responsable</th>
+                      <th>Operación</th>
+                      <th>Cuenta</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (entry of recentUserActivity; track entry.id) {
+                      <tr>
+                        <td>{{ entry.occurred_at | date: 'd MMM · HH:mm' : '' : 'es-CO' }}</td>
+                        <td>{{ entry.actor }}</td>
+                        <td>{{ entry.operation }}</td>
+                        <td>{{ entry.username }}</td>
+                      </tr>
+                    } @empty {
+                      <tr>
+                        <td colspan="4">
+                          <div class="table-empty">
+                            <img src="/icons/history.svg" alt="" width="16" height="16" />
+                            <span>Aún no hay movimientos administrativos en este parqueadero.</span>
+                          </div>
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </section>
+            }
+            <p class="panel-note">El historial se conserva al activar o desactivar una cuenta.</p>
+            <div class="panel-actions">
+              <button
+                class="button button-secondary"
+                type="button"
+                (click)="userTab = 'activity'"
+              >
+                Ver actividad administrativa
+              </button>
+            </div>
+          </section>
+        }
+
+        @if (userTab === 'status') {
+          <div class="message message--info">
+            <p class="message-title">Estados del módulo · Datos de {{ parkingName }}</p>
+            <p class="message-body">
+              Cada panel representa un estado distinto de la interfaz. Las confirmaciones y la
+              comprobación de credenciales se ejecutan contra la API del parqueadero activo.
+            </p>
+          </div>
+
+          <div class="confirm-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>
+                    @if (deactivationAvailable) {
+                      ¿Desactivar la cuenta de {{ statusFirstName }}?
+                    } @else {
+                      ¿Desactivar la cuenta?
+                    }
+                  </h2>
+                </div>
+                <span class="panel-kicker">Desactivación · Confirmación</span>
+              </div>
+              @if (deactivationAvailable) {
+                <div class="account-head">
+                  <div>
+                    <strong>{{ statusAccount?.username }}</strong>
+                    <span>{{ statusAccount?.employee_name }} · CC {{ statusAccount?.document_number }}</span>
+                  </div>
+                  <span class="status-pill status-pill--ok">● Activo</span>
+                </div>
+                <p class="panel-note">
+                  {{ statusAccount?.employee_name }} no podrá iniciar sesión con esta cuenta. Sus
+                  movimientos y su historial administrativo se conservarán.
+                </p>
+                @if (statusResult && !statusResult.active) {
+                  <div class="message message--success">
+                    <p class="message-title">✓ Cuenta desactivada</p>
+                    <p class="message-body">
+                      Resultado tras confirmar: {{ statusResult.username }} · Inactivo. Historial
+                      conservado.
+                    </p>
+                  </div>
+                }
+                <div class="panel-actions">
+                  <button class="button button-secondary" type="button" (click)="cancelStatusChange()">
+                    Cancelar
+                  </button>
+                  <button
+                    class="button button--danger"
+                    type="button"
+                    [disabled]="busy"
+                    (click)="confirmUserStatus(false)"
+                  >
+                    Sí, desactivar cuenta
+                  </button>
+                </div>
+              } @else {
+                <p class="panel-note">
+                  Selecciona una cuenta activa en el directorio para ver esta confirmación.
+                </p>
+                <div class="panel-actions">
+                  <button class="button button--danger" type="button" disabled>
+                    Sí, desactivar cuenta
+                  </button>
+                </div>
+              }
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>
+                    @if (activationAvailable) {
+                      ¿Reactivar la cuenta de {{ statusFirstName }}?
+                    } @else {
+                      ¿Activar la cuenta?
+                    }
+                  </h2>
+                </div>
+                <span class="panel-kicker">Activación · Confirmación</span>
+              </div>
+              @if (activationAvailable) {
+                <div class="account-head">
+                  <div>
+                    <strong>{{ statusAccount?.username }}</strong>
+                    <span>{{ statusAccount?.employee_name }} · CC {{ statusAccount?.document_number }}</span>
+                  </div>
+                  <span class="status-pill status-pill--warn">○ Inactivo</span>
+                </div>
+                <p class="panel-note">
+                  {{ statusAccount?.employee_name }} podrá volver a iniciar sesión. Sus movimientos y
+                  su historial administrativo se conservarán.
+                </p>
+                @if (statusResult && statusResult.active) {
+                  <div class="message message--success">
+                    <p class="message-title">✓ Cuenta activada</p>
+                    <p class="message-body">
+                      Resultado tras confirmar: {{ statusResult.username }} · Activo. Historial
+                      conservado.
+                    </p>
+                  </div>
+                }
+                <div class="panel-actions">
+                  <button class="button button-secondary" type="button" (click)="cancelStatusChange()">
+                    Cancelar
+                  </button>
+                  <button
+                    class="button button-primary"
+                    type="button"
+                    [disabled]="busy"
+                    (click)="confirmUserStatus(true)"
+                  >
+                    Sí, activar cuenta
+                  </button>
+                </div>
+              } @else {
+                <p class="panel-note">
+                  Selecciona una cuenta inactiva en el directorio para ver esta confirmación.
+                </p>
+                <div class="panel-actions">
+                  <button class="button button-primary" type="button" disabled>
+                    Sí, activar cuenta
+                  </button>
+                </div>
+              }
+            </section>
+          </div>
+
+          <div class="login-grid">
+            @for (state of loginStates; track state.id) {
+              <section class="panel login-panel">
+                <div class="panel-head">
+                  <div>
+                    <h2>Inicia sesión</h2>
+                    <p>Ingresa con el usuario asignado por tu administrador.</p>
+                  </div>
+                  <span class="panel-kicker">{{ loginKicker(state) }}</span>
+                </div>
+                <form class="stack-form" (ngSubmit)="runLoginCheck(state)">
+                  <div class="campo" [class.campo--error]="state.status === 'REQUIRED' && !state.username">
+                    <label for="login-{{ state.id }}-user">Usuario *</label>
+                    <input
+                      id="login-{{ state.id }}-user"
+                      name="loginUser-{{ state.id }}"
+                      type="text"
+                      autocomplete="off"
+                      placeholder="Sin completar"
+                      [ngModel]="state.username"
+                      (ngModelChange)="onLoginField(state, 'username', $event)"
+                    />
+                    @if (state.status === 'REQUIRED' && !state.username) {
+                      <span class="field-hint field-hint--error">Ingresa tu usuario.</span>
+                    }
+                  </div>
+                  <div class="campo" [class.campo--error]="state.status === 'REQUIRED' && !state.password">
+                    <label for="login-{{ state.id }}-pass">Contraseña *</label>
+                    <input
+                      id="login-{{ state.id }}-pass"
+                      name="loginPass-{{ state.id }}"
+                      type="password"
+                      autocomplete="off"
+                      placeholder="••••••••••••"
+                      [ngModel]="state.password"
+                      (ngModelChange)="onLoginField(state, 'password', $event)"
+                    />
+                    @if (state.status === 'REQUIRED' && !state.password) {
+                      <span class="field-hint field-hint--error">Ingresa tu contraseña.</span>
+                    } @else {
+                      <span class="field-hint">La contraseña permanece oculta.</span>
+                    }
+                  </div>
+                  <div
+                    class="message"
+                    [class.message--error]="state.status === 'REQUIRED' || state.status === 'BAD_CREDENTIALS'"
+                    [class.message--warning]="state.status === 'INACTIVE'"
+                    [class.message--success]="state.status === 'OK'"
+                    role="alert"
+                  >
+                    <p class="message-title">{{ loginTitle(state) }}</p>
+                    <p class="message-body">{{ loginBody(state) }}</p>
+                  </div>
+                  <button
+                    class="button"
+                    [class.button-secondary]="!state.username || !state.password"
+                    [class.button-primary]="!!state.username && !!state.password"
+                    type="submit"
+                    [disabled]="busy"
+                  >
+                    {{ loginAction(state) }}
+                  </button>
+                </form>
+              </section>
+            }
+          </div>
+
+          <div class="profile-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>{{ usersPermissionError ? 'Acceso restringido' : 'Acceso a la sección' }}</h2>
+                </div>
+                <span class="panel-kicker">{{ routeKicker }}</span>
+              </div>
+              <span class="chip">
+                {{ actorAccount ? actorAccount.employee_name + ' · ' + roleLabel(actorAccount) : 'Sin cuenta activa' }}
+              </span>
+              @if (usersPermissionError) {
+                <div class="message message--error">
+                  <p class="message-title">No tienes permiso para esta sección</p>
+                  <p class="message-body">{{ usersPermissionError }}</p>
+                </div>
+                <p class="panel-note">Contacta a {{ adminReference }} si necesitas revisar tu rol.</p>
+              } @else {
+                <div class="message message--success">
+                  <p class="message-title">Tu cuenta tiene permiso para esta sección</p>
+                  <p class="message-body">
+                    La gestión de usuarios está reservada al Administrador y esta cuenta dispone de
+                    ese permiso. No hay datos de la sección restringida.
+                  </p>
+                </div>
+                <p class="panel-note">
+                  Puedes cambiar la cuenta que actúa desde «Mi perfil y permisos».
+                </p>
+              }
+              <div class="panel-actions">
+                <button class="button button-secondary" type="button" (click)="backToDashboard()">
+                  Volver al resumen operativo
+                </button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Mi perfil y permisos</h2>
+                </div>
+                <span class="panel-kicker">{{ profileKicker }}</span>
+              </div>
+              @if (actorAccount; as account) {
+                <div class="account-head">
+                  <div>
+                    <strong>{{ account.employee_name }}</strong>
+                    <span>{{ account.username }} · CC {{ account.document_number }}</span>
+                  </div>
+                  <span
+                    class="status-pill"
+                    [class.status-pill--ok]="account.active"
+                    [class.status-pill--warn]="!account.active"
+                  >
+                    {{ roleLabel(account) }} · {{ account.active ? 'Activo' : 'Inactivo' }}
+                  </span>
+                </div>
+                <div class="data-rows">
+                  <p>
+                    <span>Parqueadero</span>
+                    <strong>{{ parkingName }} · {{ sites[0]?.name ?? 'Sede principal' }}</strong>
+                  </p>
+                </div>
+                <p class="panel-note">{{ roleDescription(account) }}</p>
+
+                <div class="campo">
+                  <label for="actorSelect">Cuenta que actúa (demostración)</label>
+                  <select
+                    id="actorSelect"
+                    name="actorSelect"
+                    [ngModel]="actorUsername"
+                    (ngModelChange)="switchActor($event)"
+                  >
+                    <option value="">Sin cuenta · cerrar sesión</option>
+                    @for (row of activeAccounts; track row.id) {
+                      <option [value]="row.username">
+                        {{ row.employee_name }} · {{ roleLabel(row) }}
+                      </option>
+                    }
+                  </select>
+                  <span class="field-hint">
+                    Esta interfaz no usa sesiones: la API recibe la cuenta en la cabecera
+                    X-Actor-Username.
+                  </span>
+                </div>
+
+                @if (showMyPermissions) {
+                  <div class="data-rows">
+                    @for (fn of permissionFunctions; track fn.code) {
+                      <p>
+                        <span>{{ fn.label }}</span>
+                        <strong>{{ actorPermissions.includes(fn.code) ? 'Permitido' : 'Restringido' }}</strong>
+                      </p>
+                    }
+                  </div>
+                }
+
+                <div class="panel-actions">
+                  <button
+                    class="button button-secondary"
+                    type="button"
+                    (click)="showMyPermissions = !showMyPermissions"
+                  >
+                    {{ showMyPermissions ? 'Ocultar mis permisos' : 'Ver mis permisos' }}
+                  </button>
+                  <button class="button button-secondary" type="button" (click)="switchActor('')">
+                    Cerrar sesión
+                  </button>
+                </div>
+              } @else {
+                <p class="panel-note">
+                  No hay ninguna cuenta de acceso en este parqueadero. Crea la primera desde el
+                  directorio.
+                </p>
+                <div class="panel-actions">
+                  <button class="button button-primary" type="button" (click)="openCreateUser()">
+                    Crear cuenta
+                  </button>
+                </div>
+              }
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Permisos por rol</h2>
+                <p>Alcance de cada rol dentro de la interfaz.</p>
+              </div>
+              <span class="panel-kicker">Matriz de permisos</span>
+            </div>
+            <section class="data-table" aria-label="Permisos por rol">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Función</th>
+                    @for (role of userRoles; track role.id) {
+                      <th>{{ role.name }}</th>
+                    }
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (row of permissionMatrix; track row.label) {
+                    <tr>
+                      <td>{{ row.label }}</td>
+                      @for (cell of row.cells; track cell.role.id) {
+                        <td [class.cell-ok]="cell.allowed" [class.cell-blocked]="!cell.allowed">
+                          {{ cell.text }}
+                        </td>
+                      }
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </section>
+            <p class="panel-note">
+              Los permisos se sirven desde la API y se validan también en FastAPI para las
+              operaciones de cuentas y bitácora.
+            </p>
+          </section>
+
+          <div class="message message--info message--disclaimer">
+            <p class="message-title">API real · Sin sesión persistente</p>
+            <p class="message-body">
+              Las contraseñas se guardan con hash PBKDF2, los permisos de esta sección se validan en
+              FastAPI y la comprobación de acceso no crea sesión. El inicio de sesión con sesión
+              persistente no está implementado.
+            </p>
+          </div>
+        }
+
+        @if (userTab === 'activity') {
+          @if (usersPermissionError && !userActivity.length) {
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Actividad administrativa</h2>
+                </div>
+                <span class="panel-kicker">Bitácora · Solo lectura</span>
+              </div>
+              <div class="message message--error">
+                <p class="message-title">! No tienes permiso para esta sección</p>
+                <p class="message-body">{{ usersPermissionError }}</p>
+              </div>
+              <p class="panel-note">Contacta a {{ adminReference }} si necesitas revisar tu rol.</p>
+              <div class="panel-actions">
+                <button class="button button-secondary" type="button" (click)="backToDashboard()">
+                  Volver al resumen operativo
+                </button>
+              </div>
+            </section>
+          } @else {
+            <section class="data-table" aria-label="Actividad administrativa">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fecha / hora</th>
+                    <th>Responsable</th>
+                    <th>Operación</th>
+                    <th>Cuenta</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (entry of userActivity; track entry.id) {
+                    <tr>
+                      <td>{{ entry.occurred_at | date: 'd MMM y · HH:mm' : '' : 'es-CO' }}</td>
+                      <td>{{ entry.actor }}</td>
+                      <td>{{ entry.operation }}</td>
+                      <td>{{ entry.username }}</td>
+                    </tr>
+                  } @empty {
+                    <tr>
+                      <td colspan="4">
+                        <div class="table-empty">
+                          <img src="/icons/history.svg" alt="" width="16" height="16" />
+                          <span>Aún no hay movimientos administrativos en este parqueadero.</span>
+                        </div>
+                      </td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </section>
+            <p class="panel-footnote">
+              El historial se conserva al activar o desactivar una cuenta.
+            </p>
+          }
+        }
+      }
+
+      @if (page === 'users-form') {
+        <div class="message message--info">
+          <p class="message-title">Formulario de cuenta · {{ parkingName }}</p>
+          <p class="message-body">
+            Cada campo se valida en la interfaz y en la API. Solo aparecen empleados previamente
+            registrados sin cuenta de acceso.
+          </p>
+        </div>
+
+        @if (userFormBanner) {
+          <div
+            class="message"
+            [class.message--success]="userFormBanner.kind === 'success'"
+            [class.message--error]="userFormBanner.kind === 'error'"
+            role="alert"
+          >
+            <p class="message-title">{{ userFormBanner.title }}</p>
+            <p class="message-body">{{ userFormBanner.body }}</p>
+          </div>
+        }
+
+        <section class="panel form-panel">
+          <div class="panel-head">
+            <div>
+              <h2>{{ userFormMode === 'create' ? 'Crear cuenta de acceso' : 'Editar cuenta de acceso' }}</h2>
+              <p>
+                @if (userFormMode === 'create') {
+                  Vincula el acceso a un empleado ya registrado.
+                } @else {
+                  La edición pertenece solo a esta cuenta; no cambia el empleado vinculado.
+                }
+              </p>
+            </div>
+            <span class="panel-kicker">{{ userFormKicker }}</span>
+          </div>
+          <span class="chip chip--info">
+            {{ userFormMode === 'create' ? 'Empleado existente · Sin cuenta' : 'Cuenta seleccionada · ' + (editingUser?.active ? 'Activa' : 'Inactiva') }}
+          </span>
+
+          <form class="stack-form" (ngSubmit)="saveUser()">
+            @if (userFormMode === 'create') {
+              <div class="campo" [class.campo--error]="!!userFormErrors.employee_id">
+                <label for="userEmployee">Seleccionar empleado registrado *</label>
+                <select
+                  id="userEmployee"
+                  name="userEmployee"
+                  [(ngModel)]="userForm.employee_id"
+                  (ngModelChange)="onFormEmployeeChange()"
+                  [disabled]="!availableEmployees.length"
+                >
+                  <option [ngValue]="0">— Selecciona —</option>
+                  @for (employee of availableEmployees; track employee.id) {
+                    <option [ngValue]="employee.id">
+                      {{ employee.full_name }} · CC {{ employee.document_number }}
+                    </option>
+                  }
+                </select>
+                @if (userFormErrors.employee_id) {
+                  <span class="field-hint field-hint--error">{{ userFormErrors.employee_id }}</span>
+                } @else {
+                  <span class="field-hint">
+                    Solo empleados previamente registrados y sin cuenta.
+                    @if (!availableEmployees.length) {
+                      Si no aparece ninguno, revisa que existan empleados sin cuenta.
+                    }
+                  </span>
+                }
+              </div>
+            } @else {
+              <div class="campo">
+                <label>Empleado vinculado</label>
+                <div class="readonly-value">
+                  {{ editingUser?.employee_name }} · CC {{ editingUser?.document_number }}
+                </div>
+                <span class="field-hint">
+                  La edición pertenece solo a esta cuenta; no cambia el empleado vinculado.
+                </span>
+              </div>
+            }
+
+            <div class="campo" [class.campo--error]="!!userFormErrors.username">
+              <label for="userUsername">Usuario único *</label>
+              <input
+                id="userUsername"
+                name="userUsername"
+                type="text"
+                autocomplete="off"
+                placeholder="nombre.apellido"
+                [(ngModel)]="userForm.username"
+              />
+              @if (userFormErrors.username) {
+                <span class="field-hint field-hint--error">{{ userFormErrors.username }}</span>
+              } @else {
+                <span class="field-hint">
+                  @if (userFormMode === 'edit') {
+                    Puedes conservar el usuario actual. No puedes usar el de otra cuenta.
+                  } @else {
+                    Formato propuesto: 4–30 caracteres; letras minúsculas, números, punto o guion
+                    bajo. Sin espacios.
+                  }
+                </span>
+              }
+            </div>
+
+            <div class="campo" [class.campo--error]="!!userFormErrors.password">
+              <label for="userPassword">
+                {{ userFormMode === 'create' ? 'Contraseña *' : 'Nueva contraseña' }}
+              </label>
+              <input
+                id="userPassword"
+                name="userPassword"
+                type="password"
+                autocomplete="new-password"
+                [placeholder]="userFormMode === 'edit' ? 'Sin cambios · ••••••••••••' : 'Mínimo 12 caracteres'"
+                [(ngModel)]="userForm.password"
+              />
+              @if (userFormErrors.password) {
+                <span class="field-hint field-hint--error">{{ userFormErrors.password }}</span>
+              } @else {
+                <span class="field-hint">
+                  @if (userFormMode === 'edit') {
+                    No se consulta la contraseña actual. Completa una nueva solo si necesitas
+                    cambiarla.
+                  } @else {
+                    Contraseña oculta · Política propuesta: mínimo 12 caracteres.
+                  }
+                </span>
+              }
+            </div>
+
+            <div class="campo" [class.campo--error]="!!userFormErrors.role_ids">
+              <label for="userRoleSelect">Rol *</label>
+              <select
+                id="userRoleSelect"
+                name="userRoleSelect"
+                [ngModel]="singleRoleValue"
+                (ngModelChange)="setSingleRole($event)"
+                [disabled]="!userRoles.length"
+              >
+                <option value="">— Selecciona —</option>
+                <option value="__multi__" [disabled]="userForm.role_ids.length < 2">
+                  Varios roles seleccionados
+                </option>
+                @for (role of userRoles; track role.id) {
+                  <option [value]="role.code">{{ role.name }}</option>
+                }
+              </select>
+              <span class="field-hint">ROLES SELECCIONADOS</span>
+              <div class="role-chips">
+                @for (role of userRoles; track role.id) {
+                  <button
+                    type="button"
+                    class="role-chip"
+                    [class.role-chip--on]="userForm.role_ids.includes(role.id)"
+                    [attr.aria-pressed]="userForm.role_ids.includes(role.id)"
+                    (click)="toggleRole(role.id)"
+                  >
+                    {{ userForm.role_ids.includes(role.id) ? '✓' : '' }} {{ role.name }}
+                  </button>
+                } @empty {
+                  <span class="field-hint">Cargando roles…</span>
+                }
+              </div>
+              @if (userFormErrors.role_ids) {
+                <span class="field-hint field-hint--error">{{ userFormErrors.role_ids }}</span>
+              }
+            </div>
+
+            <div class="permissions-box">
+              <p class="permissions-title">{{ selectedRoleTitle }}</p>
+              <p class="permissions-body">{{ selectedRoleDescription }}</p>
+            </div>
+
+            @if (userFormMode === 'edit' && !adminRoleNote) {
+              <div class="permissions-box">
+                <p class="permissions-title">Si seleccionas Administrador</p>
+                <p class="permissions-body">
+                  Se amplían los permisos a usuarios, estructura y actividad administrativa.
+                </p>
+              </div>
+            }
+
+            <div class="panel-actions">
+              @if (userFormMode === 'create') {
+                <button class="button button-primary" type="submit" [disabled]="busy">
+                  Crear cuenta
+                </button>
+                <button class="button button-secondary" type="button" (click)="closeUserForm()">
+                  Volver al directorio
+                </button>
+              } @else {
+                <button class="button button-primary" type="submit" [disabled]="busy">
+                  Guardar cambios de {{ userFirstName(editingUser) }}
+                </button>
+                <button class="button button-secondary" type="button" (click)="closeUserForm()">
+                  Cancelar edición
+                </button>
+              }
+            </div>
+          </form>
+        </section>
+      }
+
       @if (page === 'reports') {
         <section class="filter-bar filter-bar--search" aria-label="Filtros del reporte">
           <div class="filter-search">
@@ -4545,7 +6335,9 @@
                   <h2>Resumen por vehículo</h2>
                 </div>
               </div>
-              <span class="status-pill status-pill--ok">{{ selectedVehicle?.plate }} · {{ selectedVehicle?.type_name }}</span>
+              @if (selectedVehicle) {
+                <span class="status-pill status-pill--ok">{{ selectedVehicle.plate }} · {{ selectedVehicle.type_name }}</span>
+              }
               @for (i of [].constructor(paymentMonths); track $index) {
                 <p><span class="cell-sub">Periodo {{ $index + 1 }}　</span><strong>Próximo periodo</strong></p>
                 <p><span class="cell-sub">Importe periodo {{ $index + 1 }}　</span><strong>{{ formatMoney(monthlyPrice(paymentVehicleId)) }} COP</strong></p>

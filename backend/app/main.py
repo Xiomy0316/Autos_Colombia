@@ -2,29 +2,42 @@ from calendar import monthrange
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, time
 from decimal import Decimal
+import re
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from .database import Base, engine, get_db
 from .models import (
-    Cell, Customer, Employee, MonthlyContract, MonthlyTariff, Movement, Novelty,
-    ParkingLot, Payment, Shift, Site, Vehicle, VehicleType, Zone,
+    Cell, CellStatusEvent, Customer, Employee, MonthlyContract, MonthlyTariff,
+    Movement, Novelty, ParkingLot, Payment, Role, Shift, Site, UserAccount,
+    UserActivity, UserRole, Vehicle, VehicleType, Zone, v_user_roles,
 )
 from .schemas import (
-    CellCreate, CellStatusUpdate, CustomerCreate, EmployeeCreate, EmployeeUpdate,
-    EntryCreate, NoveltyCreate, ParkingLotCreate, ParkingLotUpdate, PaymentCreate,
-    ShiftCreate, ShiftUpdate, SiteCreate, TariffCreate, VehicleCreate, ZoneCreate,
+    CellCreate, CellStatusUpdate, CellUpdate, CustomerCreate, EmployeeCreate,
+    EmployeeUpdate, EntryCreate, NoveltyCreate, ParkingLotCreate, ParkingLotUpdate,
+    PaymentCreate, RoleOut, ShiftCreate, ShiftUpdate, SiteCreate, TariffCreate,
+    UserAccessCheck, UserCreate, UserStatusUpdate, UserUpdate, VehicleCreate,
+    ZoneCreate,
 )
+from .security import hash_password, verify_password
+from .views import ensure_reporting_views
+
+#: Cabecera con la cuenta que realiza la operación. Este proyecto no tiene
+#: sesiones: la interfaz envía el administrador activo en esta cabecera.
+ACTOR_HEADER = "X-Actor-Username"
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # Las vistas no viven en el metadata: se crean aparte (idempotente).
+    with engine.begin() as connection:
+        ensure_reporting_views(connection)
     with Session(bind=engine) as db:
         seed_database(db)
     yield
@@ -116,7 +129,47 @@ def shift_payload(shift: Shift) -> dict[str, Any]:
     }
 
 
+#: Catálogo de roles. Los códigos son los mismos que Autos Colombia ya usa en
+#: `employees.role` (`ADMIN` y `OPERATOR`) para no duplicar roles ni alterar los
+#: permisos actuales; `name` es la etiqueta mostrada por el módulo Usuarios.
+#: La misma lista (congelada) vive en la migración 9d21f4c7ab05.
+ROLE_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "code": "ADMIN",
+        "name": "Administrador",
+        "description": (
+            "Incluye operación, gestión de usuarios, sedes, zonas, celdas y "
+            "consulta de actividad administrativa."
+        ),
+        "sort": 1,
+    },
+    {
+        "code": "OPERATOR",
+        "name": "Empleado",
+        "description": (
+            "Registrar ingresos, salidas, pagos y novedades; consultar "
+            "disponibilidad. No administra usuarios, sedes, zonas ni celdas."
+        ),
+        "sort": 2,
+    },
+)
+
+
+def seed_roles(db: Session) -> None:
+    """Asegura el catálogo de roles sin duplicarlo ni alterar lo existente."""
+    added = False
+    for entry in ROLE_CATALOG:
+        exists = db.scalar(select(Role.id).where(Role.code == entry["code"]))
+        if exists:
+            continue
+        db.add(Role(**entry))
+        added = True
+    if added:
+        db.commit()
+
+
 def seed_database(db: Session) -> None:
+    seed_roles(db)
     if db.scalar(select(ParkingLot.id).limit(1)):
         return
     lot = ParkingLot(name="Autos Colombia · demostración", tax_id=None)
@@ -590,6 +643,7 @@ def cell_payload(db: Session, cell: Cell) -> dict[str, Any]:
         "id": cell.id, "zone_id": cell.zone_id, "zone_name": zone.name if zone else "",
         "site_id": site.id if site else None, "site_name": site.name if site else "",
         "code": cell.code, "operational_status": cell.operational_status,
+        "description": cell.description,
         "occupied": movement is not None,
         "vehicle_id": movement.vehicle_id if movement else None,
         "vehicle_plate": movement.vehicle.plate if movement else None,
@@ -628,8 +682,53 @@ def create_cell(payload: CellCreate, parking_lot_id: int | None = None, db: Sess
     return cell_payload(db, cell)
 
 
+@app.patch("/api/cells/{cell_id}")
+def update_cell(cell_id: int, payload: CellUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Edita código, zona, compatibilidad u observación de una celda libre."""
+    cell = db.get(Cell, cell_id)
+    if not cell:
+        raise HTTPException(404, "Celda no encontrada")
+    movement = db.scalar(select(Movement.id).where(Movement.cell_id == cell_id, Movement.exited_at.is_(None)))
+    if movement:
+        raise HTTPException(409, "No se puede editar una celda ocupada")
+    zone_id = payload.zone_id if payload.zone_id is not None else cell.zone_id
+    zone = db.get(Zone, zone_id)
+    if not zone:
+        raise HTTPException(404, "Zona no encontrada")
+    code = (payload.code if payload.code is not None else cell.code).strip().upper()
+    if not code:
+        raise HTTPException(422, "El código de la celda es obligatorio")
+    types = cell.compatible_types
+    if payload.compatible_type_ids is not None:
+        types = [db.get(VehicleType, type_id) for type_id in payload.compatible_type_ids]
+        if not types or any(item is None for item in types):
+            raise HTTPException(422, "Hay tipos de vehículo no válidos")
+    duplicate = db.scalar(
+        select(Cell.id).where(Cell.zone_id == zone_id, Cell.code == code, Cell.id != cell_id)
+    )
+    if duplicate:
+        raise HTTPException(409, "Ya existe una celda con ese código en esta zona")
+    cell.zone_id = zone_id
+    cell.code = code
+    cell.compatible_types = [item for item in types if item is not None]
+    if payload.description is not None:
+        cell.description = payload.description.strip()[:200]
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Ya existe una celda con ese código en esta zona")
+    db.refresh(cell)
+    return cell_payload(db, cell)
+
+
 @app.patch("/api/cells/{cell_id}/status")
-def update_cell_status(cell_id: int, payload: CellStatusUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
+def update_cell_status(
+    cell_id: int,
+    payload: CellStatusUpdate,
+    x_actor_username: str | None = Header(default=None, alias=ACTOR_HEADER),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     if payload.operational_status not in {"ACTIVE", "MAINTENANCE", "INACTIVE"}:
         raise HTTPException(422, "Estado operativo no válido")
     cell = db.get(Cell, cell_id)
@@ -638,9 +737,49 @@ def update_cell_status(cell_id: int, payload: CellStatusUpdate, db: Session = De
     movement = db.scalar(select(Movement.id).where(Movement.cell_id == cell_id, Movement.exited_at.is_(None)))
     if movement and payload.operational_status != "ACTIVE":
         raise HTTPException(409, "No se puede cambiar una celda ocupada")
+    previous = cell.operational_status
     cell.operational_status = payload.operational_status
+    # Bitácora del cambio: motivo, responsable y fecha/hora (sin datos sensibles).
+    db.add(
+        CellStatusEvent(
+            cell_id=cell.id,
+            from_status=previous,
+            to_status=payload.operational_status,
+            reason=payload.reason.strip()[:240],
+            actor=(x_actor_username or "").strip()[:60],
+        )
+    )
     db.commit()
     return cell_payload(db, cell)
+
+
+@app.get("/api/cells/{cell_id}/status-events")
+def list_cell_status_events(
+    cell_id: int,
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Historial de cambios de estado de una celda (motivo, responsable, fecha)."""
+    if not db.get(Cell, cell_id):
+        raise HTTPException(404, "Celda no encontrada")
+    rows = db.scalars(
+        select(CellStatusEvent)
+        .where(CellStatusEvent.cell_id == cell_id)
+        .order_by(CellStatusEvent.created_at.desc(), CellStatusEvent.id.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "cell_id": row.cell_id,
+            "from_status": row.from_status,
+            "to_status": row.to_status,
+            "reason": row.reason,
+            "actor": row.actor or "Sistema",
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
 
 
 @app.get("/api/tariffs")
@@ -1214,3 +1353,581 @@ def create_novelty(payload: NoveltyCreate, db: Session = Depends(get_db)) -> dic
     db.refresh(novelty)
     return {"id": novelty.id, "vehicle_id": novelty.vehicle_id, "category": novelty.category,
             "description": novelty.description, "created_at": novelty.created_at.isoformat(), "status": novelty.status}
+
+
+# --------------------------------------------------------------------------- #
+# Administración · Usuarios                                                     #
+# Cuentas de acceso (`users`), catálogo de roles (`roles`), asignación N:M      #
+# (`user_roles`), bitácora (`user_activity`) y vista `v_user_roles`.            #
+# `employees` solo se lee para vincular el empleado: sus columnas heredadas     #
+# (`username`, `password_hash`, `role`) no se usan ni se modifican aquí.        #
+# --------------------------------------------------------------------------- #
+
+#: `ACTOR_HEADER` se define junto a los imports (lo usan también los endpoints
+#: de celdas, que guardan el responsable en `cell_status_events`).
+
+#: Permisos por código de rol. Los mismos códigos son los que la matriz de la
+#: interfaz muestra y los que los endpoints de este módulo validan.
+ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "ADMIN": ("OPERATE", "VIEW_AVAILABILITY", "MANAGE_ACCOUNTS", "MANAGE_STRUCTURE", "VIEW_ACTIVITY"),
+    "OPERATOR": ("OPERATE", "VIEW_AVAILABILITY"),
+}
+
+#: Filas de la matriz «Permisos por rol».
+PERMISSION_FUNCTIONS: tuple[tuple[str, str], ...] = (
+    ("OPERATE", "Registrar ingresos, salidas, pagos y novedades"),
+    ("VIEW_AVAILABILITY", "Consultar disponibilidad y celdas compatibles"),
+    ("MANAGE_ACCOUNTS", "Crear, editar, activar o desactivar cuentas"),
+    ("MANAGE_STRUCTURE", "Gestionar sedes, zonas y configuración de celdas"),
+    ("VIEW_ACTIVITY", "Consultar bitácora administrativa"),
+)
+
+#: Etiquetas de la bitácora administrativa.
+ACTIVITY_LABELS: dict[str, str] = {
+    "USER_CREATED": "Creación de cuenta",
+    "USER_UPDATED": "Edición de cuenta",
+    "ROLES_UPDATED": "Actualización de rol",
+    "USER_ACTIVATED": "Activación de cuenta",
+    "USER_DEACTIVATED": "Desactivación de cuenta",
+    "PASSWORD_CHANGED": "Actualización de contraseña",
+}
+
+USERNAME_PATTERN = re.compile(r"^[a-z0-9._]{4,30}$")
+MIN_PASSWORD_LENGTH = 12
+
+
+def resolve_parking_lot(db: Session, parking_lot_id: int | None) -> int:
+    """Aísla la operación por parqueadero: valida el indicado o usa el activo."""
+    if parking_lot_id:
+        if not db.get(ParkingLot, parking_lot_id):
+            raise HTTPException(404, "Parqueadero no encontrado")
+        return parking_lot_id
+    lot_id = db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    if not lot_id:
+        raise HTTPException(404, "No hay parqueaderos registrados")
+    return lot_id
+
+
+def role_ids_for_codes(db: Session, codes: tuple[str, ...]) -> list[int]:
+    return list(db.scalars(select(Role.id).where(Role.code.in_(codes)).order_by(Role.sort, Role.id)))
+
+
+def role_codes_of(db: Session, user_id: int) -> set[str]:
+    rows = db.execute(
+        select(Role.code).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user_id)
+    ).scalars()
+    return set(rows)
+
+
+def actor_permissions(db: Session, lot_id: int, actor: str | None) -> set[str]:
+    """Permisos efectivos de la cuenta enviada en la cabecera de actor."""
+    username = (actor or "").strip()
+    if not username:
+        return set()
+    user = db.scalar(
+        select(UserAccount).where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
+    )
+    if not user or not user.active:
+        return set()
+    permissions: set[str] = set()
+    for code in role_codes_of(db, user.id):
+        permissions.update(ROLE_PERMISSIONS.get(code, ()))
+    return permissions
+
+
+def require_permission(db: Session, lot_id: int, actor: str | None, permission: str) -> None:
+    """Autoriza en FastAPI, no solo en la interfaz.
+
+    Reglas:
+    * Parqueadero sin cuentas: se permite el primer alta (no hay nada que proteger).
+    * Sin cabecera de actor cuando ya hay cuentas: 401.
+    * Actor sin la cuenta, inactiva o sin el permiso: 403.
+    """
+    total = db.scalar(select(func.count(UserAccount.id)).where(UserAccount.parking_lot_id == lot_id)) or 0
+    if total == 0:
+        return
+    username = (actor or "").strip()
+    if not username:
+        raise HTTPException(401, "Identifica al administrador con la cabecera X-Actor-Username")
+    user = db.scalar(
+        select(UserAccount).where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
+    )
+    if not user:
+        raise HTTPException(403, "La cuenta que actúa no pertenece a este parqueadero")
+    if not user.active:
+        raise HTTPException(403, f"La cuenta {username} está inactiva")
+    if permission not in actor_permissions(db, lot_id, username):
+        raise HTTPException(403, "Tu rol no tiene permiso para esta operación: está reservada al Administrador")
+
+
+def acting_name(db: Session, lot_id: int, actor: str | None) -> str:
+    """Nombre de quien realiza la operación para la bitácora (sin contraseñas)."""
+    username = (actor or "").strip()
+    if not username:
+        return "Alta inicial"
+    user = db.scalar(
+        select(UserAccount).where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
+    )
+    if not user:
+        return username[:60]
+    employee = db.get(Employee, user.employee_id)
+    return (employee.full_name if employee else user.username)[:60]
+
+
+def validate_username(value: str | None) -> str:
+    """Formato del usuario único: 4–30 caracteres en minúsculas, números, . o _."""
+    username = (value or "").strip()
+    if not username:
+        raise HTTPException(422, "El usuario es obligatorio.")
+    if not USERNAME_PATTERN.fullmatch(username):
+        if len(username) < 4 or len(username) > 30:
+            raise HTTPException(422, "El usuario debe tener entre 4 y 30 caracteres.")
+        raise HTTPException(
+            422,
+            "Formato inválido: no uses espacios, tildes ni signos no admitidos. "
+            "Admite letras minúsculas, números, punto o guion bajo.",
+        )
+    return username
+
+
+def validate_password(value: str | None, *, required: bool) -> str | None:
+    """Política de contraseña: mínimo 12 caracteres. Vacío = sin cambios."""
+    password = value or ""
+    if not password:
+        if required:
+            raise HTTPException(422, "La contraseña es obligatoria para crear la cuenta.")
+        return None
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(422, "No cumple la política propuesta: usa al menos 12 caracteres.")
+    if len(password) > 200:
+        raise HTTPException(422, "La contraseña no puede superar los 200 caracteres.")
+    return password
+
+
+def validate_role_ids(db: Session, value: list[int] | None) -> list[int]:
+    ids = list(dict.fromkeys(int(item) for item in (value or [])))
+    if not ids:
+        raise HTTPException(422, "Selecciona Administrador o Empleado.")
+    roles = list(db.scalars(select(Role).where(Role.id.in_(ids))))
+    if len(roles) != len(ids):
+        raise HTTPException(422, "El rol indicado no existe.")
+    return [role.id for role in sorted(roles, key=lambda item: (item.sort, item.id))]
+
+
+def role_names(db: Session, role_ids: list[int]) -> str:
+    if not role_ids:
+        return ""
+    names = db.scalars(
+        select(Role.name).where(Role.id.in_(role_ids)).order_by(Role.sort, Role.id)
+    ).all()
+    return " · ".join(names)
+
+
+def split_csv(value: str | None) -> list[str]:
+    return [item for item in (value or "").split(",") if item]
+
+
+def role_payload(role: Role) -> dict[str, Any]:
+    return {
+        "id": role.id,
+        "code": role.code,
+        "name": role.name,
+        "description": role.description,
+        "permissions": list(ROLE_PERMISSIONS.get(role.code, ())),
+    }
+
+
+def user_payload(row: Any) -> dict[str, Any]:
+    """Fila de `v_user_roles`. No incluye `password_hash` por construcción."""
+    return {
+        "id": row.id,
+        "parking_lot_id": row.parking_lot_id,
+        "employee_id": row.employee_id,
+        "username": row.username,
+        "active": bool(row.active),
+        "employee_name": row.employee_name,
+        "document_number": row.document_number,
+        "role_codes": split_csv(row.role_codes),
+        "role_names": split_csv(row.role_names),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "last_login": row.last_login.isoformat() if row.last_login else None,
+    }
+
+
+def fetch_user_payload(db: Session, user_id: int, lot_id: int) -> dict[str, Any]:
+    row = db.execute(
+        select(v_user_roles).where(v_user_roles.c.id == user_id, v_user_roles.c.parking_lot_id == lot_id)
+    ).first()
+    if not row:
+        raise HTTPException(404, "Cuenta no encontrada")
+    return user_payload(row)
+
+
+def record_activity(
+    db: Session,
+    *,
+    lot_id: int,
+    action: str,
+    detail: str = "",
+    actor: str = "",
+    user_id: int | None = None,
+    employee_id: int | None = None,
+) -> None:
+    """Registra la operación administrativa. Nunca guarda contraseñas ni hashes."""
+    db.add(
+        UserActivity(
+            parking_lot_id=lot_id,
+            user_id=user_id,
+            employee_id=employee_id,
+            action=action,
+            detail=detail[:240],
+            actor=actor[:60],
+        )
+    )
+
+
+def activity_payload(item: UserActivity, account: UserAccount | None) -> dict[str, Any]:
+    label = ACTIVITY_LABELS.get(item.action, item.action)
+    operation = f"{label} · {item.detail}" if item.detail else label
+    return {
+        "id": item.id,
+        "occurred_at": item.occurred_at.isoformat(),
+        "actor": item.actor or "Sistema",
+        "action": item.action,
+        "operation": operation,
+        "detail": item.detail,
+        "username": account.username if account else "",
+    }
+
+
+@app.get("/api/roles")
+def list_roles(db: Session = Depends(get_db)) -> list[RoleOut]:
+    """Catálogo de roles con los permisos que esta API aplica en sus endpoints."""
+    roles = db.scalars(select(Role).order_by(Role.sort, Role.id)).all()
+    return [role_payload(role) for role in roles]
+
+
+@app.get("/api/users/employees-available")
+def list_available_employees(
+    parking_lot_id: int | None = None,
+    actor: str | None = Header(default=None, alias=ACTOR_HEADER),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Empleados del parqueadero que todavía no tienen cuenta de acceso."""
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    require_permission(db, lot_id, actor, "MANAGE_ACCOUNTS")
+    already_account = select(UserAccount.employee_id).where(UserAccount.parking_lot_id == lot_id)
+    employees = db.scalars(
+        select(Employee)
+        .where(Employee.parking_lot_id == lot_id, ~Employee.id.in_(already_account))
+        .options(joinedload(Employee.shift))
+        .order_by(Employee.full_name)
+    ).unique().all()
+    return [employee_payload(employee) for employee in employees]
+
+
+@app.get("/api/users/activity")
+def list_user_activity(
+    parking_lot_id: int | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    actor: str | None = Header(default=None, alias=ACTOR_HEADER),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Bitácora administrativa: visible solo para quien tiene VIEW_ACTIVITY."""
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    require_permission(db, lot_id, actor, "VIEW_ACTIVITY")
+    rows = db.execute(
+        select(UserActivity, UserAccount)
+        .outerjoin(UserAccount, UserActivity.user_id == UserAccount.id)
+        .where(UserActivity.parking_lot_id == lot_id)
+        .order_by(UserActivity.occurred_at.desc(), UserActivity.id.desc())
+        .limit(limit)
+    ).all()
+    return [activity_payload(item, account) for item, account in rows]
+
+
+@app.get("/api/users")
+def list_users(
+    parking_lot_id: int | None = None,
+    search: str = "",
+    role: str = "",
+    status: str = "",
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Directorio de cuentas a través de `v_user_roles` (sin contraseñas)."""
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    stmt = select(v_user_roles).where(v_user_roles.c.parking_lot_id == lot_id)
+    term = search.strip()
+    if term:
+        like = f"%{term}%"
+        stmt = stmt.where(
+            or_(
+                v_user_roles.c.employee_name.ilike(like),
+                v_user_roles.c.document_number.ilike(like),
+                v_user_roles.c.username.ilike(like),
+            )
+        )
+    if status == "ACTIVE":
+        stmt = stmt.where(v_user_roles.c.active.is_(True))
+    elif status == "INACTIVE":
+        stmt = stmt.where(v_user_roles.c.active.is_(False))
+    if role:
+        role_id = db.scalar(select(Role.id).where(Role.code == role))
+        if not role_id:
+            return []
+        stmt = stmt.where(
+            select(UserRole.user_id)
+            .where(UserRole.role_id == role_id, UserRole.user_id == v_user_roles.c.id)
+            .exists()
+        )
+    rows = db.execute(
+        stmt.order_by(v_user_roles.c.active.desc(), v_user_roles.c.employee_name)
+    ).all()
+    return [user_payload(row) for row in rows]
+
+
+@app.get("/api/users/{user_id}")
+def get_user(
+    user_id: int,
+    parking_lot_id: int | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Detalle de una cuenta. Nunca devuelve la contraseña ni su hash."""
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    return fetch_user_payload(db, user_id, lot_id)
+
+
+@app.post("/api/users", status_code=201)
+def create_user(
+    payload: UserCreate,
+    actor: str | None = Header(default=None, alias=ACTOR_HEADER),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Crea la cuenta de un empleado ya registrado y le asigna sus roles."""
+    lot_id = resolve_parking_lot(db, payload.parking_lot_id)
+    require_permission(db, lot_id, actor, "MANAGE_ACCOUNTS")
+    username = validate_username(payload.username)
+    password = validate_password(payload.password, required=True)
+    role_ids = validate_role_ids(db, payload.role_ids)
+
+    employee = db.get(Employee, payload.employee_id)
+    if not employee or employee.parking_lot_id != lot_id:
+        raise HTTPException(404, "El empleado indicado no existe en este parqueadero")
+    existing_employee = db.scalar(select(UserAccount).where(UserAccount.employee_id == employee.id))
+    if existing_employee:
+        raise HTTPException(409, "Este empleado ya tiene una cuenta de acceso")
+    conflict = db.scalar(
+        select(UserAccount)
+        .join(Employee, Employee.id == UserAccount.employee_id)
+        .where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
+    )
+    if conflict:
+        owner = db.get(Employee, conflict.employee_id)
+        raise HTTPException(
+            409,
+            f"Este usuario ya pertenece a {owner.full_name if owner else conflict.username}. "
+            "Elige otro usuario.",
+        )
+
+    user = UserAccount(
+        parking_lot_id=lot_id,
+        employee_id=employee.id,
+        username=username,
+        password_hash=hash_password(password or ""),
+        active=bool(payload.active),
+    )
+    db.add(user)
+    db.flush()
+    for role_id in role_ids:
+        db.add(UserRole(user_id=user.id, role_id=role_id))
+    record_activity(
+        db,
+        lot_id=lot_id,
+        action="USER_CREATED",
+        detail=role_names(db, role_ids),
+        actor=acting_name(db, lot_id, actor),
+        user_id=user.id,
+        employee_id=employee.id,
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Este empleado ya tiene una cuenta de acceso")
+    return fetch_user_payload(db, user.id, lot_id)
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    parking_lot_id: int | None = None,
+    actor: str | None = Header(default=None, alias=ACTOR_HEADER),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Edita usuario, contraseña y/o roles de una cuenta de este parqueadero."""
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    require_permission(db, lot_id, actor, "MANAGE_ACCOUNTS")
+    user = db.scalar(
+        select(UserAccount).where(UserAccount.id == user_id, UserAccount.parking_lot_id == lot_id)
+    )
+    if not user:
+        raise HTTPException(404, "Cuenta no encontrada")
+
+    data = payload.model_dump(exclude_unset=True)
+    log_name = acting_name(db, lot_id, actor)
+    changes: list[str] = []
+    password_changed = False
+
+    if "username" in data:
+        username = validate_username(data.get("username"))
+        if username != user.username:
+            conflict = db.scalar(
+                select(UserAccount)
+                .join(Employee, Employee.id == UserAccount.employee_id)
+                .where(
+                    UserAccount.parking_lot_id == lot_id,
+                    UserAccount.username == username,
+                    UserAccount.id != user.id,
+                )
+            )
+            if conflict:
+                owner = db.get(Employee, conflict.employee_id)
+                raise HTTPException(
+                    409,
+                    f"Este usuario ya pertenece a {owner.full_name if owner else conflict.username}. "
+                    "Elige un usuario diferente.",
+                )
+            user.username = username
+            changes.append(f"Usuario: {username}")
+
+    if "password" in data:
+        password = validate_password(data.get("password"), required=False)
+        if password:
+            user.password_hash = hash_password(password)
+            password_changed = True
+
+    roles_changed = False
+    if "role_ids" in data:
+        role_ids = validate_role_ids(db, data.get("role_ids"))
+        current = list(db.scalars(select(UserRole.role_id).where(UserRole.user_id == user.id)))
+        if set(role_ids) != set(current):
+            roles_changed = True
+            db.execute(delete(UserRole).where(UserRole.user_id == user.id))
+            for role_id in role_ids:
+                db.add(UserRole(user_id=user.id, role_id=role_id))
+            changes.append(f"Roles: {role_names(db, role_ids)}")
+
+    if data.get("active") is not None:
+        target = bool(data["active"])
+        if user.active != target:
+            user.active = target
+            changes.append("Activo" if target else "Inactivo")
+
+    if not changes and not password_changed:
+        return fetch_user_payload(db, user.id, lot_id)
+
+    user.updated_at = datetime.now()
+    if changes:
+        record_activity(
+            db,
+            lot_id=lot_id,
+            action="USER_UPDATED",
+            detail=" · ".join(changes),
+            actor=log_name,
+            user_id=user.id,
+            employee_id=user.employee_id,
+        )
+    if roles_changed:
+        record_activity(
+            db,
+            lot_id=lot_id,
+            action="ROLES_UPDATED",
+            detail=role_names(db, list(db.scalars(select(UserRole.role_id).where(UserRole.user_id == user.id)))),
+            actor=log_name,
+            user_id=user.id,
+            employee_id=user.employee_id,
+        )
+    if password_changed:
+        # Solo se registra el hecho: nunca la contraseña ni su hash.
+        record_activity(
+            db,
+            lot_id=lot_id,
+            action="PASSWORD_CHANGED",
+            detail=user.username,
+            actor=log_name,
+            user_id=user.id,
+            employee_id=user.employee_id,
+        )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Este usuario ya pertenece a otra cuenta")
+    return fetch_user_payload(db, user.id, lot_id)
+
+
+@app.patch("/api/users/{user_id}/status")
+def set_user_status(
+    user_id: int,
+    payload: UserStatusUpdate,
+    parking_lot_id: int | None = None,
+    actor: str | None = Header(default=None, alias=ACTOR_HEADER),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Activa o desactiva una cuenta y lo registra en la bitácora."""
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    require_permission(db, lot_id, actor, "MANAGE_ACCOUNTS")
+    user = db.scalar(
+        select(UserAccount).where(UserAccount.id == user_id, UserAccount.parking_lot_id == lot_id)
+    )
+    if not user:
+        raise HTTPException(404, "Cuenta no encontrada")
+
+    target = bool(payload.active)
+    if user.active != target:
+        user.active = target
+        user.updated_at = datetime.now()
+        record_activity(
+            db,
+            lot_id=lot_id,
+            action="USER_ACTIVATED" if target else "USER_DEACTIVATED",
+            actor=acting_name(db, lot_id, actor),
+            user_id=user.id,
+            employee_id=user.employee_id,
+        )
+        db.commit()
+    return fetch_user_payload(db, user.id, lot_id)
+
+
+@app.post("/api/users/access-check")
+def access_check(payload: UserAccessCheck, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Comprueba credenciales sin crear sesión ni registrar la contraseña.
+
+    Estados que la interfaz representa: credenciales incorrectas y cuenta
+    inactiva. Este proyecto no implementa autenticación con sesión.
+    """
+    lot_id = resolve_parking_lot(db, payload.parking_lot_id)
+    username = (payload.username or "").strip()
+    user = db.scalar(
+        select(UserAccount).where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
+    )
+    invalid = {
+        "status": "BAD_CREDENTIALS",
+        "message": "El usuario o la contraseña no coinciden. Verifica los datos e inténtalo de nuevo.",
+    }
+    if not user or not verify_password(payload.password or "", user.password_hash):
+        return invalid
+    if not user.active:
+        return {
+            "status": "INACTIVE",
+            "message": "Contacta al administrador para revisar el estado de tu cuenta. No se inició sesión.",
+        }
+    role_ids = list(db.scalars(select(UserRole.role_id).where(UserRole.user_id == user.id)))
+    return {
+        "status": "OK",
+        "username": user.username,
+        "roles": role_names(db, role_ids),
+        "message": "Credenciales verificadas. Esta interfaz no inicia sesión.",
+    }

@@ -33,8 +33,20 @@ class CellCreate(BaseModel):
     description: str = ""
 
 
+class CellUpdate(BaseModel):
+    """Edición de una celda: solo los campos enviados se modifican."""
+
+    zone_id: int | None = None
+    code: str | None = Field(default=None, min_length=1, max_length=30)
+    compatible_type_ids: list[int] | None = Field(default=None, min_length=1)
+    description: str | None = Field(default=None, max_length=200)
+
+
 class CellStatusUpdate(BaseModel):
     operational_status: str
+    #: Motivo del cambio. La UI lo exige; la API lo recibe opcional para no
+    #: romper llamadas existentes y lo guarda en `cell_status_events`.
+    reason: str = Field(default="", max_length=240)
 
 
 class SiteCreate(BaseModel):
@@ -123,3 +135,53 @@ class TariffCreate(BaseModel):
     effective_from: date
     effective_until: date | None = None
     note: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Administración · cuentas de acceso (módulo Usuarios)                          #
+# --------------------------------------------------------------------------- #
+
+class RoleOut(BaseModel):
+    """Catálogo de roles con los permisos que la API valida en sus endpoints."""
+
+    id: int
+    code: str
+    name: str
+    description: str = ""
+    permissions: list[str] = []
+
+
+class UserCreate(BaseModel):
+    """Alta de cuenta: se vincula a un empleado ya registrado.
+
+    El formato y el largo de `username`/`password` se validan en el endpoint
+    para devolver los mensajes en español del módulo.
+    """
+
+    parking_lot_id: int
+    employee_id: int
+    username: str = ""
+    password: str = ""
+    role_ids: list[int] = []
+    active: bool = True
+
+
+class UserUpdate(BaseModel):
+    """Edición de cuenta. Las claves ausentes conservan su valor actual."""
+
+    username: str | None = None
+    password: str | None = None
+    role_ids: list[int] | None = None
+    active: bool | None = None
+
+
+class UserStatusUpdate(BaseModel):
+    active: bool
+
+
+class UserAccessCheck(BaseModel):
+    """Comprobación de credenciales sin crear sesión."""
+
+    parking_lot_id: int
+    username: str = ""
+    password: str = ""

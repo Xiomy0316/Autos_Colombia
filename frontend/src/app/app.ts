@@ -8,6 +8,7 @@ import {
   type ActivityItem,
   type Bootstrap,
   type Cell,
+  type CellStatusEvent,
   type ContractRow,
   type Customer,
   type Dashboard,
@@ -18,10 +19,13 @@ import {
   type ParkingLotSummary,
   type Payment,
   type Report,
+  type Role,
   type Shift,
   type Site,
   type Tariff,
   type TariffHistory,
+  type UserActivityRow,
+  type UserRoleRow,
   type Vehicle,
   type VehicleType,
   type Zone,
@@ -43,11 +47,28 @@ type Page =
   | 'exit'
   | 'parking-lots'
   | 'employees'
+  | 'users'
+  | 'users-form'
   | 'reports'
   | 'tariffs';
 
 /** Pestañas del módulo de empleados y turnos. */
 type EmployeeTab = 'team' | 'roles' | 'activity';
+
+/** Pestañas del módulo Administración · Usuarios. */
+type UserTab = 'directory' | 'status' | 'activity';
+
+/** Filtro de estado en el directorio de cuentas. */
+type UserStatusFilter = 'ALL' | 'ACTIVE' | 'INACTIVE';
+
+/** Estado de cada panel de comprobación de acceso (sin sesión). */
+type LoginState = {
+  id: 'required' | 'bad' | 'inactive';
+  username: string;
+  password: string;
+  status: 'REQUIRED' | 'BAD_CREDENTIALS' | 'INACTIVE' | 'OK';
+  message: string;
+};
 
 /** Pestañas del módulo de configuración operativa. */
 type ConfigTab = 'inventory' | 'types' | 'rules' | 'roles';
@@ -92,6 +113,31 @@ interface VehicleOwnerGroup {
 
 /** Pestañas del módulo de tarifas y vigencias. */
 type TariffTab = 'active' | 'history';
+
+/** Pestañas del módulo de ocupación y celdas. */
+type CellsTab = 'inventory' | 'map' | 'registration';
+
+/** Estado de una celda tal como lo muestran la leyenda y las tablas. */
+type CellStatus = 'free' | 'busy' | 'maintenance';
+
+/** Textos de encabezado de cada pestaña de ocupación y celdas (ref. Figma). */
+const CELLS_TAB_META: Record<CellsTab, { title: string; route: string; context: string }> = {
+  inventory: {
+    title: 'Inventario y capacidad',
+    route: 'OPERACIÓN / OCUPACIÓN Y CELDAS / INVENTARIO',
+    context: 'Consulta y configura celdas de la sede activa. Vista de tabla complementaria al mapa existente.',
+  },
+  map: {
+    title: 'Mapa de ocupación',
+    route: 'OPERACIÓN / INVENTARIO / OCUPACIÓN Y CELDAS',
+    context: 'Selecciona una celda para consultar su detalle.',
+  },
+  registration: {
+    title: 'Registro y configuración de celdas',
+    route: 'OPERACIÓN / OCUPACIÓN Y CELDAS / REGISTRO Y CONFIGURACIÓN',
+    context: 'Alta, edición y cambios operativos con contexto explícito de sede, zona y celda.',
+  },
+};
 
 interface NavItem {
   id: Page;
@@ -153,6 +199,7 @@ export class App implements OnInit {
         { id: 'customers', label: 'Clientes' },
         { id: 'vehicles', label: 'Vehículos' },
         { id: 'payments', label: 'Mensualidades' },
+        { id: 'payments-register', label: 'Pagos' },
         { id: 'history', label: 'Historial' },
         { id: 'novelties', label: 'Novedades' },
       ],
@@ -162,6 +209,7 @@ export class App implements OnInit {
       items: [
         { id: 'parking-lots', label: 'Parqueaderos' },
         { id: 'employees', label: 'Empleados y turnos' },
+        { id: 'users', label: 'Usuarios' },
         { id: 'reports', label: 'Reportes' },
         { id: 'settings', label: 'Configuración' },
         { id: 'tariffs', label: 'Tarifas y vigencias' },
@@ -226,6 +274,16 @@ export class App implements OnInit {
       ruta: 'ADMINISTRACIÓN / EMPLEADOS Y TURNOS',
       titulo: 'Empleados y turnos',
       contexto: 'Asigna responsabilidades por usuario y consulta quién realiza cada operación.',
+    },
+    users: {
+      ruta: 'Administración / Usuarios',
+      titulo: 'Usuarios',
+      contexto: 'Administra las cuentas de acceso del personal registrado en este parqueadero.',
+    },
+    'users-form': {
+      ruta: 'Administración / Usuarios / Cuenta',
+      titulo: 'Crear y editar cuenta',
+      contexto: 'Vincula el acceso a un empleado ya registrado. Los campos con * son obligatorios.',
     },
     reports: {
       ruta: 'ADMINISTRACIÓN / ANÁLISIS / REPORTES OPERATIVOS',
@@ -301,6 +359,41 @@ export class App implements OnInit {
   editingEmployeeActive = false;
   employeeDialogOpen = false;
 
+  /* Módulo de administración · Usuarios (cuentas de acceso) */
+  userTab: UserTab = 'directory';
+  userRoles: Role[] = [];
+  users: UserRoleRow[] = [];
+  userActivity: UserActivityRow[] = [];
+  availableEmployees: Employee[] = [];
+  userFilters = { search: '', role: '', status: 'ALL' as UserStatusFilter };
+  appliedUserFilters = { search: '', role: '', status: 'ALL' as UserStatusFilter };
+  userPage = 1;
+  readonly userPageSize = 7;
+  /**
+   * Cuenta que actúa. No hay sesiones: la API la recibe en X-Actor-Username.
+   * Al iniciar se usa la primera cuenta activa con rol Administrador.
+   */
+  actorUsername = '';
+  private actorManual = false;
+  /** Detalle de un 401/403 de la API: alimenta el estado «Acceso restringido». */
+  usersPermissionError = '';
+  selectedUserId = 0;
+  userFormMode: 'create' | 'edit' = 'create';
+  editingUserId = 0;
+  userForm = { employee_id: 0, username: '', password: '', role_ids: [] as number[] };
+  userFormErrors = { employee_id: '', username: '', password: '', role_ids: '' };
+  userFormBanner: { kind: 'success' | 'error'; title: string; body: string } | null = null;
+  statusTarget: UserRoleRow | null = null;
+  statusResult: { username: string; active: boolean } | null = null;
+  /** Estado que se pide confirmar en la pestaña «Estado y permisos». */
+  statusWantedActive = false;
+  showMyPermissions = false;
+  loginStates: LoginState[] = [
+    { id: 'required', username: '', password: '', status: 'REQUIRED', message: '' },
+    { id: 'bad', username: 'diego.ramirez', password: '', status: 'BAD_CREDENTIALS', message: '' },
+    { id: 'inactive', username: 'oscar.valencia', password: '', status: 'INACTIVE', message: '' },
+  ];
+
   /* Módulo de administración · reportes */
   reportFilters = { site_id: 0, zone_id: 0, vehicle_type_id: 0, report_date: '' };
   reportPage = 1;
@@ -323,7 +416,7 @@ export class App implements OnInit {
   customerDialogOpen = false;
   customerEditingId = 0;
   customerProfileId = 0;
-  cellForm = { zone_id: 0, code: '', compatible_type_ids: [] as number[] };
+  cellForm = { site_id: 0, zone_id: 0, code: '', compatible_type_ids: [] as number[], description: '' };
   siteForm = { name: '', address: '' };
 
   /* Módulo de gestión · directorio y búsqueda de vehículos */
@@ -348,13 +441,41 @@ export class App implements OnInit {
   paymentHistoryVehicleId = 0;
 
   /* Módulo de operación · ocupación y celdas */
+  cellsTab: CellsTab = 'inventory';
   cellsSearch = '';
   mapSiteId = 0;
   mapZoneId = 0;
   mapTypeId = 0;
   mapCellId = 0;
   mapZoneOptions: Zone[] = [];
-  cellDialogOpen = false;
+  /* Inventario y capacidad · los filtros se aplican con su propio botón. */
+  invDraft = { search: '', site_id: 0, zone_id: 0, status: '', type_id: 0 };
+  invFilters = { search: '', site_id: 0, zone_id: 0, status: '', type_id: 0 };
+  invPage = 1;
+  readonly invPageSize = 8;
+  invCellId = 0;
+  /** Último cambio de estado conocido de cada celda (se carga página a página). */
+  invEvents: Record<number, CellStatusEvent> = {};
+  /* Registro y configuración · alta, edición y cambios de estado. */
+  cellCreateAttempted = false;
+  cellCreateNotice = '';
+  cellCreateServerCodeError = '';
+  cellEditId = 0;
+  cellEditForm = { zone_id: 0, code: '', compatible_type_ids: [] as number[], description: '' };
+  cellEditAttempted = false;
+  cellEditNotice = '';
+  cellEditServerCodeError = '';
+  cellMaintId = 0;
+  cellMaintReason = '';
+  cellMaintAttempted = false;
+  cellMaintNotice = '';
+  cellFreeId = 0;
+  cellFreeReason = '';
+  cellFreeAttempted = false;
+  cellFreeNotice = '';
+  /** Último cambio de estado registrado en cada panel (motivo y responsable). */
+  cellMaintLast: CellStatusEvent | null = null;
+  cellFreeLast: CellStatusEvent | null = null;
   zoneForm = { site_id: 0, name: '' };
   parkingName = '';
   parkingTaxId = '';
@@ -659,10 +780,28 @@ export class App implements OnInit {
     return sitio?.name ?? 'Sede principal';
   }
 
-  /** Contexto de la pantalla; en inventario refleja la sede real del mapa. */
+  /** Título del encabezado; en ocupación y celdas depende de la pestaña. */
+  get pageTitle(): string {
+    if (this.page === 'cells') return CELLS_TAB_META[this.cellsTab].title;
+    return this.pageMeta[this.page].titulo;
+  }
+
+  /** Ruta de migas; en ocupación y celdas depende de la pestaña. */
+  get pageRoute(): string {
+    if (this.page === 'cells') return CELLS_TAB_META[this.cellsTab].route;
+    return this.pageMeta[this.page].ruta;
+  }
+
+  /** Contexto de la pantalla; en ocupación y celdas depende de la pestaña. */
   get pageContext(): string {
     if (this.page === 'cells') {
-      return `Inventario de ${this.mapSiteName}. Selecciona una celda para consultar su detalle.`;
+      if (this.cellsTab === 'inventory') {
+        return `Consulta y configura celdas de ${this.activeSiteName}. Vista de tabla complementaria al mapa existente.`;
+      }
+      if (this.cellsTab === 'map') {
+        return `Inventario de ${this.activeSiteName}. Selecciona una celda para consultar su detalle.`;
+      }
+      return CELLS_TAB_META[this.cellsTab].context;
     }
     if (this.page === 'customers') {
       return `Consulta los propietarios y administra sus datos en ${this.customerScopeName}.`;
@@ -731,36 +870,45 @@ export class App implements OnInit {
     return celdas.find((celda) => celda.id === this.mapCellId) ?? celdas[0];
   }
 
+  /** Estado de una celda: libre, ocupada o en mantenimiento. */
+  cellStatus(cell: Cell | undefined): CellStatus {
+    if (!cell) return 'free';
+    if (cell.operational_status !== 'ACTIVE') return 'maintenance';
+    return cell.occupied ? 'busy' : 'free';
+  }
+
+  /** Vehículo que ocupa una celda (si la hay). */
+  vehicleOf(cell: Cell | undefined): Vehicle | undefined {
+    if (!cell || !cell.vehicle_id) return undefined;
+    return this.vehicles.find((vehiculo) => vehiculo.id === cell.vehicle_id);
+  }
+
+  /** Movimiento activo de una celda. */
+  movementOf(cell: Cell | undefined): Movement | undefined {
+    if (!cell) return undefined;
+    return this.movements.find(
+      (movimiento) => movimiento.cell_id === cell.id && !movimiento.exited_at,
+    );
+  }
+
   /** Vehículo que ocupa la celda enfocada. */
   get mapCellVehicle(): Vehicle | undefined {
-    const celda = this.mapCell;
-    if (!celda || !celda.vehicle_id) return undefined;
-    return this.vehicles.find((vehiculo) => vehiculo.id === celda.vehicle_id);
+    return this.vehicleOf(this.mapCell);
   }
 
   /** Movimiento activo de la celda enfocada. */
   get mapCellMovement(): Movement | undefined {
-    const celda = this.mapCell;
-    if (!celda) return undefined;
-    return this.movements.find(
-      (movimiento) => movimiento.cell_id === celda.id && !movimiento.exited_at,
-    );
+    return this.movementOf(this.mapCell);
   }
 
   /** Estado de la celda enfocada: libre, ocupada o en mantenimiento. */
-  get mapCellState(): 'free' | 'busy' | 'maintenance' {
-    const celda = this.mapCell;
-    if (!celda) return 'free';
-    if (celda.operational_status !== 'ACTIVE') return 'maintenance';
-    return celda.occupied ? 'busy' : 'free';
+  get mapCellState(): CellStatus {
+    return this.cellStatus(this.mapCell);
   }
 
   /** Estado de la celda enfocada, sin icono. */
   get mapCellStateName(): string {
-    const celda = this.mapCell;
-    if (!celda) return 'Sin celda seleccionada';
-    if (celda.operational_status !== 'ACTIVE') return 'Mantenimiento';
-    return celda.occupied ? 'Ocupada' : 'Libre';
+    return this.cellStatusName(this.mapCell);
   }
 
   /** Icono del estado de la celda enfocada, el mismo de la leyenda. */
@@ -770,20 +918,34 @@ export class App implements OnInit {
     return '○';
   }
 
-  /** Estado de una celda del mapa, con el icono de la leyenda. */
-  mapCellStateLabel(cell: Cell): string {
-    if (cell.operational_status !== 'ACTIVE') return '⚒ Mantenimiento';
-    return cell.occupied ? '● Ocupada' : '○ Libre';
+  /** Estado de una celda con el icono de la leyenda (mapa e inventario). */
+  cellStatusLabel(cell: Cell): string {
+    const estado = this.cellStatus(cell);
+    if (estado === 'maintenance') return '⚒ Mantenimiento';
+    return estado === 'busy' ? '● Ocupada' : '○ Libre';
+  }
+
+  /** Nombre corto del estado, sin icono. */
+  cellStatusName(cell: Cell | undefined): string {
+    if (!cell) return 'Sin celda seleccionada';
+    const estado = this.cellStatus(cell);
+    if (estado === 'maintenance') return 'Mantenimiento';
+    return estado === 'busy' ? 'Ocupada' : 'Libre';
+  }
+
+  /** Tipos de vehículo admitidos por una celda, en texto legible. */
+  cellCompatibility(cell: Cell | undefined): string {
+    if (!cell) return '—';
+    const nombres = cell.compatible_types.map((tipo) => tipo.name);
+    if (!nombres.length) return 'Sin tipos definidos';
+    if (nombres.length === 1) return nombres[0];
+    const lista = nombres.map((nombre, indice) => (indice === 0 ? nombre : nombre.toLowerCase()));
+    return `${lista.slice(0, -1).join(', ')} y ${lista[lista.length - 1]}`;
   }
 
   /** Tipos de vehículo admitidos por la celda enfocada, en texto. */
   get mapCellCompatibility(): string {
-    const celda = this.mapCell;
-    if (!celda) return '—';
-    const nombres = celda.compatible_types.map((tipo) => tipo.name);
-    if (nombres.length <= 1) return nombres[0] ?? 'Sin tipos definidos';
-    const lista = nombres.map((nombre, indice) => (indice === 0 ? nombre : nombre.toLowerCase()));
-    return `${lista.slice(0, -1).join(', ')} y ${lista[lista.length - 1]}`;
+    return this.cellCompatibility(this.mapCell);
   }
 
   /** Carga las zonas de la sede visible en el mapa. */
@@ -811,18 +973,520 @@ export class App implements OnInit {
     this.mapCellId = cell.id;
   }
 
-  /** Abre el alta de celdas desde el encabezado de la pantalla. */
-  openCellDialog(): void {
-    this.cellDialogOpen = true;
-    if (!this.cellForm.zone_id) this.cellForm.zone_id = this.mapZoneOptions[0]?.id ?? 0;
+  /** Cambia de pestaña dentro de ocupación y celdas. */
+  setCellsTab(tab: CellsTab): void {
+    this.cellsTab = tab;
+    this.error = '';
+    if (tab === 'registration') {
+      if (!this.cellForm.site_id) this.resetCreateCellForm();
+      this.ensureRegistrationCells();
+    }
   }
 
-  /** Cierra el alta de celdas. */
-  closeCellDialog(): void {
-    this.cellDialogOpen = false;
+  /** Abre el alta de celdas en la pestaña «Registro y configuración». */
+  openCreateCell(): void {
+    if (this.page !== 'cells') this.navigate('cells');
+    this.cellsTab = 'registration';
+    this.error = '';
+    this.resetCreateCellForm();
+    this.ensureRegistrationCells();
   }
 
-  /** Pasa la celda enfocada a mantenimiento o la reactiva. */
+  /** Deja los cuatro paneles con una celda elegida cuando la hay. */
+  private ensureRegistrationCells(): void {
+    const primera = this.configurableCells[0];
+    if (!primera) return;
+    if (!this.cellEditId) this.loadCellEdit(primera);
+    if (!this.cellMaintId) this.changeCellMaint(primera.id);
+    if (!this.cellFreeId) this.changeCellFree(primera.id);
+  }
+
+  /**
+   * Zonas de una sede; todas las del parqueadero si no hay sede elegida.
+   * Usa `adminZones` (listado completo que se carga al arrancar la app).
+   */
+  zonesOfSite(siteId: number): Zone[] {
+    if (!siteId) return this.adminZones;
+    return this.adminZones.filter((zona) => zona.site_id === siteId);
+  }
+
+  /** Sede visible en el encabezado según la pestaña activa. */
+  get activeSiteName(): string {
+    const id = this.cellsTab === 'inventory' ? this.invFilters.site_id : this.mapSiteId;
+    const sitio = this.sites.find((item) => item.id === id) ?? this.sites[0];
+    return sitio?.name ?? 'Sede principal';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Inventario y capacidad · filtros, paginación y consulta             */
+  /* ------------------------------------------------------------------ */
+
+  /** Zonas que ofrece el filtro de zona (reacciona al borrador de sede). */
+  get invZoneOptions(): Zone[] {
+    return this.zonesOfSite(this.invDraft.site_id);
+  }
+
+  /** Celdas del inventario con los filtros ya aplicados. */
+  get inventoryCells(): Cell[] {
+    const filtros = this.invFilters;
+    const busqueda = filtros.search.trim().toLowerCase();
+    return this.cells.filter((celda) => {
+      if (filtros.site_id && celda.site_id !== filtros.site_id) return false;
+      if (filtros.zone_id && celda.zone_id !== filtros.zone_id) return false;
+      if (filtros.status && this.cellStatus(celda) !== filtros.status) return false;
+      if (filtros.type_id && !celda.compatible_types.some((tipo) => tipo.id === filtros.type_id)) {
+        return false;
+      }
+      if (!busqueda) return true;
+      return (
+        celda.code.toLowerCase().includes(busqueda) ||
+        (celda.vehicle_plate ?? '').toLowerCase().includes(busqueda)
+      );
+    });
+  }
+
+  /** Base de «Capacidad por zona»: celdas de la sede, sin los demás filtros. */
+  get inventoryBaseCells(): Cell[] {
+    return this.invFilters.site_id
+      ? this.cells.filter((celda) => celda.site_id === this.invFilters.site_id)
+      : this.cells;
+  }
+
+  /** Fila visible en la tabla (una página de 8). */
+  get inventoryRows(): Cell[] {
+    const inicio = (this.invPage - 1) * this.invPageSize;
+    return this.inventoryCells.slice(inicio, inicio + this.invPageSize);
+  }
+
+  /** Total de páginas del listado filtrado. */
+  get inventoryTotalPages(): number {
+    return Math.max(1, Math.ceil(this.inventoryCells.length / this.invPageSize));
+  }
+
+  /** Ventana de números de página que muestra la paginación. */
+  get inventoryPages(): number[] {
+    const total = this.inventoryTotalPages;
+    const ventana = 7;
+    if (total <= ventana) return Array.from({ length: total }, (_, index) => index + 1);
+    const end = Math.min(total, Math.max(ventana, this.invPage + Math.floor(ventana / 2)));
+    const start = Math.max(1, end - ventana + 1);
+    return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+  }
+
+  /** Pie de tabla: «Vista de consulta · 8 de 80 celdas · Página 1 de 10». */
+  get inventorySummary(): string {
+    return `Vista de consulta · ${this.inventoryRows.length} de ${this.inventoryCells.length} celdas · Página ${this.invPage} de ${this.inventoryTotalPages}`;
+  }
+
+  /**
+   * Reparto actual del inventario para el resultado de cada operación.
+   * Se calcula con las celdas ya recargadas para no esperar al dashboard.
+   */
+  get inventorySummaryCounts(): string {
+    const estados = this.cells.reduce(
+      (suma, celda) => {
+        const estado = this.cellStatus(celda);
+        if (estado === 'busy') suma.occupied += 1;
+        else if (estado === 'maintenance') suma.maintenance += 1;
+        else suma.available += 1;
+        return suma;
+      },
+      { occupied: 0, available: 0, maintenance: 0 },
+    );
+    return `${estados.occupied} ocupadas + ${estados.available} disponibles + ${estados.maintenance} en mantenimiento`;
+  }
+
+  /** Celda consultada: la elegida o la primera del listado filtrado. */
+  get invCell(): Cell | undefined {
+    const filas = this.inventoryCells;
+    return filas.find((celda) => celda.id === this.invCellId) ?? filas[0];
+  }
+
+  /** Contadores por zona para el panel «Capacidad por zona». */
+  get zoneCapacityRows(): {
+    name: string; total: number; occupied: number; available: number; maintenance: number;
+  }[] {
+    const filas = new Map<
+      string,
+      { name: string; total: number; occupied: number; available: number; maintenance: number }
+    >();
+    for (const celda of this.inventoryBaseCells) {
+      const fila = filas.get(celda.zone_name) ?? {
+        name: celda.zone_name, total: 0, occupied: 0, available: 0, maintenance: 0,
+      };
+      const estado = this.cellStatus(celda);
+      fila.total += 1;
+      if (estado === 'busy') fila.occupied += 1;
+      else if (estado === 'maintenance') fila.maintenance += 1;
+      else fila.available += 1;
+      filas.set(celda.zone_name, fila);
+    }
+    return [...filas.values()];
+  }
+
+  /** Totales del panel «Capacidad por zona». */
+  get zoneCapacityTotal(): { total: number; occupied: number; available: number; maintenance: number } {
+    return this.zoneCapacityRows.reduce(
+      (suma, fila) => ({
+        total: suma.total + fila.total,
+        occupied: suma.occupied + fila.occupied,
+        available: suma.available + fila.available,
+        maintenance: suma.maintenance + fila.maintenance,
+      }),
+      { total: 0, occupied: 0, available: 0, maintenance: 0 },
+    );
+  }
+
+  /** Número de zonas del inventario visible. */
+  get inventoryZoneCount(): number {
+    return new Set(this.inventoryBaseCells.map((celda) => celda.zone_id)).size;
+  }
+
+  /** Celdas libres agrupadas: «14 automóvil/camioneta · 2 moto». */
+  get inventoryAvailableByGroup(): string {
+    const libres = this.inventoryBaseCells.filter((celda) => this.cellStatus(celda) === 'free');
+    let motos = 0;
+    for (const celda of libres) {
+      const codigos = celda.compatible_types.map((tipo) => tipo.code);
+      const soloMotos =
+        codigos.includes('MOTO') &&
+        !codigos.some((codigo) => codigo === 'CAR' || codigo === 'TRUCK');
+      if (soloMotos) motos += 1;
+    }
+    return `${libres.length - motos} automóvil/camioneta · ${motos} moto`;
+  }
+
+  /** Códigos sin asignar por mantenimiento, para el pie del indicador. */
+  get inventoryMaintenanceNote(): string {
+    const codigos = this.inventoryBaseCells
+      .filter((celda) => celda.operational_status !== 'ACTIVE')
+      .map((celda) => celda.code);
+    if (!codigos.length) return 'Sin celdas en mantenimiento';
+    if (codigos.length === 1) return `No asignable · ${codigos[0]}`;
+    return `No asignables · ${codigos.slice(0, -1).join(', ')} y ${codigos[codigos.length - 1]}`;
+  }
+
+  /** Tipos compatibles de una celda en texto de tabla: «Automóvil / Camioneta». */
+  cellTypesSlash(cell: Cell): string {
+    if (!cell.compatible_types.length) return '—';
+    return cell.compatible_types.map((tipo) => tipo.name).join(' / ');
+  }
+
+  /**
+   * Última modificación conocida de una celda: el cambio de estado registrado
+   * y, si aún no hay ninguno, el ingreso más reciente de vehículos.
+   */
+  invLastChange(cell: Cell): string {
+    const evento = this.invEvents[cell.id];
+    if (evento) return evento.created_at;
+    const movimientos = this.movements
+      .filter((movimiento) => movimiento.cell_id === cell.id)
+      .sort((a, b) => b.entered_at.localeCompare(a.entered_at));
+    return movimientos[0]?.entered_at ?? '';
+  }
+
+  /** Carga el último cambio de estado de las celdas visibles (sin repetirlos). */
+  loadInventoryEvents(): void {
+    for (const celda of this.inventoryRows) {
+      if (this.invEvents[celda.id]) continue;
+      this.api.cellStatusEvents(celda.id, 1).subscribe({
+        next: (rows) => {
+          if (rows[0]) {
+            this.invEvents[celda.id] = rows[0];
+            this.changeDetector.detectChanges();
+          }
+        },
+        error: () => undefined,
+      });
+    }
+  }
+
+  /** Cambia la sede del borrador y ajusta la zona elegida. */
+  changeInvSite(siteId: number): void {
+    this.invDraft.site_id = siteId;
+    this.invDraft.zone_id = 0;
+  }
+
+  /** Aplica el borrador de filtros del inventario. */
+  applyInvFilters(): void {
+    this.invFilters = { ...this.invDraft };
+    this.invPage = 1;
+    this.invCellId = 0;
+    this.loadInventoryEvents();
+  }
+
+  /** Limpia los filtros y vuelve a la vista base del inventario. */
+  clearInvFilters(): void {
+    this.invDraft = {
+      search: '',
+      site_id: this.sites[0]?.id ?? 0,
+      zone_id: 0,
+      status: '',
+      type_id: 0,
+    };
+    this.applyInvFilters();
+  }
+
+  /** Navega entre páginas del listado de celdas. */
+  goInvPage(pagina: number): void {
+    this.invPage = Math.min(Math.max(1, pagina), this.inventoryTotalPages);
+    this.invCellId = 0;
+    this.loadInventoryEvents();
+  }
+
+  /** Enfoca una celda del listado para su consulta de solo lectura. */
+  selectInvCell(cell: Cell): void {
+    this.invCellId = cell.id;
+  }
+
+  /** Lleva una celda del inventario a la pestaña de registro para editarla. */
+  editCellFromInventory(cell: Cell): void {
+    this.loadCellEdit(cell);
+    this.cellsTab = 'registration';
+    this.error = '';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Registro y configuración · altas, ediciones y cambios de estado     */
+  /* ------------------------------------------------------------------ */
+
+  /** Zonas que ofrece el formulario de alta (según la sede elegida). */
+  get cellFormZoneOptions(): Zone[] {
+    return this.zonesOfSite(this.cellForm.site_id);
+  }
+
+  /** Nombre de la sede del alta, para el aviso superior de la pestaña. */
+  get cellCreateSiteName(): string {
+    return this.sites.find((site) => site.id === this.cellForm.site_id)?.name ?? 'la sede activa';
+  }
+
+  /** Cambia la sede del alta y recarga sus zonas. */
+  changeCellFormSite(siteId: number): void {
+    this.cellForm.site_id = siteId;
+    this.cellForm.zone_id = this.cellFormZoneOptions[0]?.id ?? 0;
+    this.cellCreateServerCodeError = '';
+  }
+
+  /** Reinicia el formulario de alta. */
+  private resetCreateCellForm(): void {
+    this.cellCreateAttempted = false;
+    this.cellCreateNotice = '';
+    this.cellCreateServerCodeError = '';
+    this.cellForm.code = '';
+    this.cellForm.description = '';
+    this.cellForm.compatible_type_ids = [];
+    if (!this.cellForm.site_id) this.cellForm.site_id = this.sites[0]?.id ?? 0;
+    this.cellForm.zone_id = this.cellFormZoneOptions[0]?.id ?? 0;
+  }
+
+  /** Celdas configurables, ordenadas por código, para los selectores. */
+  get configurableCells(): Cell[] {
+    return [...this.cells].sort((a, b) => a.code.localeCompare(b.code));
+  }
+
+  /** Etiqueta de una celda dentro de los selectores de configuración. */
+  cellOptionLabel(cell: Cell): string {
+    return `${cell.code} · ${cell.zone_name}`;
+  }
+
+  /** Celda que edita el formulario de edición. */
+  get cellEditCell(): Cell | undefined {
+    return this.cells.find((celda) => celda.id === this.cellEditId);
+  }
+
+  /** Celda del panel «pasar a mantenimiento». */
+  get cellMaintCell(): Cell | undefined {
+    return this.cells.find((celda) => celda.id === this.cellMaintId);
+  }
+
+  /** Celda del panel «devolver a disponible». */
+  get cellFreeCell(): Cell | undefined {
+    return this.cells.find((celda) => celda.id === this.cellFreeId);
+  }
+
+  /** Carga los datos de una celda en el formulario de edición. */
+  loadCellEdit(cell: Cell | undefined): void {
+    this.cellEditId = cell?.id ?? 0;
+    this.cellEditAttempted = false;
+    this.cellEditNotice = '';
+    this.cellEditServerCodeError = '';
+    this.cellEditForm = {
+      zone_id: cell?.zone_id ?? 0,
+      code: cell?.code ?? '',
+      compatible_type_ids: cell ? cell.compatible_types.map((tipo) => tipo.id) : [],
+      description: cell?.description ?? '',
+    };
+  }
+
+  /** Selecciona la celda a editar desde el propio formulario. */
+  changeCellEdit(cellId: number): void {
+    this.loadCellEdit(this.cells.find((celda) => celda.id === cellId));
+  }
+
+  /** La edición queda bloqueada mientras la celda tenga un vehículo. */
+  get cellEditBlocked(): boolean {
+    return !!this.cellEditCell?.occupied;
+  }
+
+  /** Titulillo superior del panel de edición («EDICIÓN · A-012 · …»). */
+  get cellEditKicker(): string {
+    const celda = this.cellEditCell;
+    if (!celda) return 'Edición · Sin celda seleccionada';
+    return `Edición · ${celda.code} · ${celda.occupied ? 'Ocupada' : 'Sin movimiento activo'}`;
+  }
+
+  /** Contexto de la celda en edición («Sede / Zona»). */
+  get cellEditContext(): string {
+    const celda = this.cellEditCell;
+    if (!celda) return 'Selecciona una celda para editarla.';
+    return `${celda.site_name} / ${celda.zone_name}`;
+  }
+
+  /** Zonas del formulario de edición. */
+  get cellEditZoneOptions(): Zone[] {
+    const celda = this.cellEditCell;
+    return celda ? this.zonesOfSite(celda.site_id) : this.adminZones;
+  }
+
+  /** Errores de validación del formulario de edición. */
+  get cellEditErrors(): { zone: string; code: string; types: string } {
+    if (!this.cellEditAttempted || this.cellEditBlocked) {
+      return { zone: '', code: '', types: '' };
+    }
+    return {
+      zone: this.cellEditForm.zone_id ? '' : 'Selecciona una zona de la sede elegida.',
+      code: this.cellEditForm.code.trim() ? '' : 'El código es obligatorio.',
+      types: this.cellEditForm.compatible_type_ids.length
+        ? ''
+        : 'Selecciona al menos un tipo compatible.',
+    };
+  }
+
+  /** Contexto del panel de mantenimiento («Sede / Zona / Código»). */
+  get cellMaintContext(): string {
+    const celda = this.cellMaintCell;
+    if (!celda) return 'Selecciona una celda para continuar.';
+    return `${this.parkingName || 'Parqueadero'} / ${celda.site_name} / ${celda.zone_name} / ${celda.code}`;
+  }
+
+  /** Contexto del panel de retorno a disponible. */
+  get cellFreeContext(): string {
+    const celda = this.cellFreeCell;
+    if (!celda) return 'Selecciona una celda para continuar.';
+    return `${this.parkingName || 'Parqueadero'} / ${celda.site_name} / ${celda.zone_name} / ${celda.code}`;
+  }
+
+  /** Insignia de estado del panel de mantenimiento. */
+  get cellMaintBadge(): string {
+    const celda = this.cellMaintCell;
+    if (!celda) return '';
+    const estado = this.cellStatus(celda);
+    if (estado === 'busy') return `● Ocupada${celda.vehicle_plate ? ` · ${celda.vehicle_plate}` : ''}`;
+    if (estado === 'maintenance') return '⚒ Mantenimiento';
+    return '○ Disponible · Sin movimiento activo';
+  }
+
+  /** Insignia de estado del panel de retorno. */
+  get cellFreeBadge(): string {
+    const celda = this.cellFreeCell;
+    if (!celda) return '';
+    const estado = this.cellStatus(celda);
+    if (estado === 'busy') return `● Ocupada${celda.vehicle_plate ? ` · ${celda.vehicle_plate}` : ''}`;
+    if (estado === 'maintenance') return '⚒ Mantenimiento';
+    return '○ Disponible · Sin movimiento activo';
+  }
+
+  /** El panel de mantenimiento solo aplica a una celda disponible. */
+  get cellMaintReady(): boolean {
+    return !!this.cellMaintCell && this.cellStatus(this.cellMaintCell) === 'free';
+  }
+
+  /** El panel de retorno solo aplica a una celda en mantenimiento. */
+  get cellFreeReady(): boolean {
+    return !!this.cellFreeCell && this.cellStatus(this.cellFreeCell) === 'maintenance';
+  }
+
+  /** Aviso propio del panel de mantenimiento según el estado elegido. */
+  get cellMaintBlockNote(): string {
+    const celda = this.cellMaintCell;
+    if (!celda) return '';
+    const estado = this.cellStatus(celda);
+    if (estado === 'busy') {
+      return 'No puedes poner una celda ocupada en mantenimiento. Registra primero la salida del vehículo.';
+    }
+    if (estado === 'maintenance') return `${celda.code} ya está en mantenimiento.`;
+    return '';
+  }
+
+  /** Aviso propio del panel de retorno según el estado elegido. */
+  get cellFreeBlockNote(): string {
+    const celda = this.cellFreeCell;
+    if (!celda) return '';
+    const estado = this.cellStatus(celda);
+    if (estado === 'busy') {
+      return 'No puedes devolver una celda ocupada. Registra primero la salida del vehículo.';
+    }
+    if (estado === 'free') return `${celda.code} ya está disponible.`;
+    return '';
+  }
+
+  /** Errores del alta (solo después del primer envío). */
+  get cellCreateErrors(): { site: string; zone: string; code: string; types: string } {
+    if (!this.cellCreateAttempted) return { site: '', zone: '', code: '', types: '' };
+    return {
+      site: this.cellForm.site_id ? '' : 'La sede es obligatoria.',
+      zone: this.cellForm.zone_id ? '' : 'Selecciona una zona de la sede elegida.',
+      code: this.cellForm.code.trim() ? '' : 'El código es obligatorio.',
+      types: this.cellForm.compatible_type_ids.length
+        ? ''
+        : 'Selecciona al menos un tipo compatible.',
+    };
+  }
+
+  /** El alta es válida cuando ningún campo obligatorio está vacío. */
+  get cellCreateValid(): boolean {
+    const errores = this.cellCreateErrors;
+    return !errores.site && !errores.zone && !errores.code && !errores.types;
+  }
+
+  /** Descripción corta del estado para los selectores de configuración. */
+  cellOptionStatus(cell: Cell): string {
+    return this.cellStatusLabel(cell);
+  }
+
+  /** Tras un cambio de estado, muestra el motivo, el responsable y la fecha. */
+  private recordCellStatus(cell: Cell, panel: 'maint' | 'free'): void {
+    if (panel === 'maint') this.cellMaintLast = null;
+    else this.cellFreeLast = null;
+    this.api.cellStatusEvents(cell.id, 1).subscribe({
+      next: (rows) => {
+        if (panel === 'maint') this.cellMaintLast = rows[0] ?? null;
+        else this.cellFreeLast = rows[0] ?? null;
+        this.changeDetector.detectChanges();
+      },
+      error: () => undefined,
+    });
+  }
+
+  /** Selecciona la celda del panel «pasar a mantenimiento». */
+  changeCellMaint(cellId: number): void {
+    this.cellMaintId = cellId;
+    this.cellMaintAttempted = false;
+    this.cellMaintNotice = '';
+    this.cellMaintLast = null;
+    this.cellMaintReason = '';
+  }
+
+  /** Selecciona la celda del panel «devolver a disponible». */
+  changeCellFree(cellId: number): void {
+    this.cellFreeId = cellId;
+    this.cellFreeAttempted = false;
+    this.cellFreeNotice = '';
+    this.cellFreeLast = null;
+    this.cellFreeReason = '';
+  }
+
+  /** Pasa la celda enfocada a mantenimiento o la reactiva (acción del mapa). */
   applyCellStatus(): void {
     const celda = this.mapCell;
     if (!celda) return;
@@ -1397,6 +2061,7 @@ export class App implements OnInit {
   }
 
   refreshLists(): void {
+    this.initActor();
     this.api.customers().subscribe({
       next: (data) => {
         this.customers = data;
@@ -1415,6 +2080,7 @@ export class App implements OnInit {
     this.api.cells().subscribe({
       next: (data) => {
         this.cells = data;
+        this.loadInventoryEvents();
         this.changeDetector.detectChanges();
       },
       error: (err: unknown) => this.fail(err),
@@ -1514,6 +2180,8 @@ export class App implements OnInit {
     }
     if (page === 'cells') {
       this.loadMapZones();
+      // Inventario y capacidad: filtros en su estado inicial (sede por defecto).
+      this.clearInvFilters();
     }
     if (page === 'payments') {
       this.api.contracts().subscribe({
@@ -1534,6 +2202,16 @@ export class App implements OnInit {
     }
     if (page === 'employees') {
       this.loadAdminTeam();
+    }
+    if (page === 'users') {
+      this.loadAdminTeam();
+      this.loadUserRoles();
+      this.loadUsers(true);
+    }
+    if (page === 'users-form') {
+      this.loadAdminTeam();
+      this.loadUserRoles();
+      this.loadAvailableEmployees();
     }
     if (page === 'reports') {
       this.loadAdminZones();
@@ -1575,12 +2253,22 @@ export class App implements OnInit {
     this.paymentVehicleId = vehicle.id;
   }
 
+  /** Marca o desmarca un tipo compatible en el alta de celda. */
   toggleCompatible(typeId: number, event: Event): void {
     const checked = (event.target as HTMLInputElement).checked;
     this.cellForm.compatible_type_ids = checked
       ? [...this.cellForm.compatible_type_ids, typeId]
       : this.cellForm.compatible_type_ids.filter((id) => id !== typeId);
   }
+
+  /** Marca o desmarca un tipo compatible en la edición de celda. */
+  toggleEditCompatible(typeId: number, event: Event): void {
+    const checked = (event.target as HTMLInputElement).checked;
+    this.cellEditForm.compatible_type_ids = checked
+      ? [...this.cellEditForm.compatible_type_ids, typeId]
+      : this.cellEditForm.compatible_type_ids.filter((id) => id !== typeId);
+  }
+
   exitVehicle(vehicle: Vehicle): void {
     const movement = this.movements.find(
       (item) => item.vehicle_id === vehicle.id && !item.exited_at,
@@ -1904,31 +2592,128 @@ export class App implements OnInit {
       });
   }
 
+  /** Envía el alta de celda con sus validaciones en línea. */
   addCell(): void {
-    if (!this.cellForm.compatible_type_ids.length) {
-      this.error = 'Selecciona al menos un tipo de vehículo compatible.';
-      return;
-    }
-    this.api.createCell(this.cellForm).subscribe({
+    this.cellCreateAttempted = true;
+    this.cellCreateServerCodeError = '';
+    this.cellCreateNotice = '';
+    if (!this.cellCreateValid) return;
+    this.api
+      .createCell({
+        zone_id: this.cellForm.zone_id,
+        code: this.cellForm.code.trim(),
+        compatible_type_ids: [...this.cellForm.compatible_type_ids],
+        description: this.cellForm.description.trim(),
+      })
+      .subscribe({
+        next: (celda) => {
+          this.cellCreateAttempted = false;
+          this.cellCreateNotice = `✓ Celda creada correctamente — ${celda.code} inicia Disponible.`;
+          this.cellForm.code = '';
+          this.cellForm.description = '';
+          this.cellForm.compatible_type_ids = [];
+          this.refreshLists();
+          this.reloadDashboard();
+        },
+        error: (err: unknown) => this.handleCellWriteError(err, 'create'),
+      });
+  }
+
+  /** Guarda la edición de la celda elegida en el formulario. */
+  saveCellEdit(): void {
+    this.cellEditAttempted = true;
+    this.cellEditServerCodeError = '';
+    this.cellEditNotice = '';
+    const celda = this.cellEditCell;
+    if (!celda || this.cellEditBlocked) return;
+    const errores = this.cellEditErrors;
+    if (errores.code || errores.zone || errores.types) return;
+    this.api
+      .updateCell(celda.id, {
+        zone_id: this.cellEditForm.zone_id,
+        code: this.cellEditForm.code.trim(),
+        compatible_type_ids: [...this.cellEditForm.compatible_type_ids],
+        description: this.cellEditForm.description.trim(),
+      })
+      .subscribe({
+        next: (actualizada) => {
+          this.loadCellEdit(actualizada);
+          this.cellEditNotice = `✓ Cambios guardados en ${actualizada.code}.`;
+          this.refreshLists();
+          this.reloadDashboard();
+        },
+        error: (err: unknown) => this.handleCellWriteError(err, 'edit'),
+      });
+  }
+
+  /** Confirma el paso a mantenimiento con su motivo obligatorio. */
+  confirmCellMaintenance(): void {
+    this.cellMaintAttempted = true;
+    const celda = this.cellMaintCell;
+    if (!celda || !this.cellMaintReady || !this.cellMaintReason.trim()) return;
+    this.api.updateCellStatus(celda.id, 'MAINTENANCE', this.cellMaintReason.trim()).subscribe({
       next: () => {
-        this.cellForm.code = '';
-        this.cellForm.compatible_type_ids = [];
-        this.cellDialogOpen = false;
-        this.done('Celda agregada al inventario.');
+        this.cellMaintAttempted = false;
+        this.cellMaintReason = '';
+        this.cellMaintNotice = `✓ Celda ${celda.code} · Mantenimiento. Registrado con motivo, responsable y fecha.`;
         this.refreshLists();
         this.reloadDashboard();
+        this.recordCellStatus(celda, 'maint');
       },
       error: (err: unknown) => this.fail(err),
     });
   }
 
-  toggleCell(cell: Cell): void {
+  /** Confirma el retorno a disponible con su motivo obligatorio. */
+  confirmCellAvailable(): void {
+    this.cellFreeAttempted = true;
+    const celda = this.cellFreeCell;
+    if (!celda || !this.cellFreeReady || !this.cellFreeReason.trim()) return;
+    this.api.updateCellStatus(celda.id, 'ACTIVE', this.cellFreeReason.trim()).subscribe({
+      next: () => {
+        this.cellFreeAttempted = false;
+        this.cellFreeReason = '';
+        this.cellFreeNotice = `✓ Celda ${celda.code} · Disponible. Registrado con motivo, responsable y fecha.`;
+        this.refreshLists();
+        this.reloadDashboard();
+        this.recordCellStatus(celda, 'free');
+      },
+      error: (err: unknown) => this.fail(err),
+    });
+  }
+
+  /**
+   * Maneja los errores de escritura de celdas: el 409 suele ser un código
+   * repetido y se muestra junto al campo, no como aviso general.
+   */
+  private handleCellWriteError(err: unknown, scope: 'create' | 'edit'): void {
+    const response = err as HttpErrorResponse;
+    const detail = response?.error?.detail;
+    if (response?.status === 409 && typeof detail === 'string' && detail.includes('código')) {
+      const zoneId = scope === 'create' ? this.cellForm.zone_id : this.cellEditForm.zone_id;
+      const zona = this.adminZones.find((item) => item.id === zoneId);
+      const sitio = this.sites.find((item) => item.id === zona?.site_id);
+      const mensaje = `Este código ya existe en ${zona?.name ?? 'esta zona'} de ${
+        sitio?.name ?? 'esta sede'
+      }. Usa uno diferente.`;
+      if (scope === 'create') this.cellCreateServerCodeError = mensaje;
+      else this.cellEditServerCodeError = mensaje;
+      this.error = '';
+      this.changeDetector.detectChanges();
+      return;
+    }
+    this.fail(err);
+  }
+
+  /** Cambia el estado operativo de una celda (acción rápida del mapa). */
+  toggleCell(cell: Cell, reason = 'Cambio solicitado desde el mapa de ocupación'): void {
     const next = cell.operational_status === 'ACTIVE' ? 'MAINTENANCE' : 'ACTIVE';
-    this.api.updateCellStatus(cell.id, next).subscribe({
+    this.api.updateCellStatus(cell.id, next, reason).subscribe({
       next: () => {
         this.done(`Celda ${cell.code}: ${next === 'ACTIVE' ? 'operativa' : 'en mantenimiento'}.`);
         this.refreshLists();
         this.reloadDashboard();
+        this.recordCellStatus(cell, next === 'ACTIVE' ? 'free' : 'maint');
       },
       error: (err: unknown) => this.fail(err),
     });
@@ -2759,10 +3544,6 @@ export class App implements OnInit {
     });
   }
 
-  typeCapacity(code: string): { total: number; occupied: number; available: number } {
-    return this.dashboard?.occupancy_by_type[code] ?? { total: 0, occupied: 0, available: 0 };
-  }
-
   /** Una celda sirve para el ingreso si está operativa, libre y es compatible. */
   private entryCellFits(cell: Cell): boolean {
     const vehicle = this.selectedVehicle;
@@ -2773,6 +3554,708 @@ export class App implements OnInit {
       cell.compatible_types.some((type) => type.id === vehicle.vehicle_type_id)
     );
   }
+
+  /* ------------------------------------------------------------------ */
+  /* Módulo de administración · Usuarios                                 */
+  /* ------------------------------------------------------------------ */
+
+  /** Carga el directorio completo del parqueadero (los filtros se aplican en cliente). */
+  loadUsers(withActivity = false): void {
+    this.api
+      .users({})
+      .subscribe({
+        next: (rows) => {
+          this.users = rows;
+          this.resolveActor(rows);
+          if (!this.selectedUserId && rows.length) this.selectedUserId = rows[0].id;
+          if (this.statusTarget) {
+            this.statusTarget = rows.find((row) => row.id === this.statusTarget?.id) ?? null;
+          }
+          if (this.userPage > this.userTotalPages) this.userPage = 1;
+          if (withActivity) this.loadActivity();
+          this.changeDetector.detectChanges();
+        },
+        error: (err: unknown) => this.usersFail(err),
+      });
+  }
+
+  /** Catálogo de roles con los permisos que la API aplica. */
+  loadUserRoles(): void {
+    if (this.userRoles.length) {
+      this.applyDefaultRole();
+      return;
+    }
+    this.api.roles().subscribe({
+      next: (roles) => {
+        this.userRoles = roles;
+        this.applyDefaultRole();
+        this.changeDetector.detectChanges();
+      },
+      error: (err: unknown) => this.fail(err),
+    });
+  }
+
+  /** El alta propone «Empleado» como rol inicial (como en el diseño). */
+  private applyDefaultRole(): void {
+    if (this.userFormMode !== 'create' || this.userForm.role_ids.length) return;
+    const operator = this.userRoles.find((role) => role.code === 'OPERATOR');
+    if (operator) this.userForm = { ...this.userForm, role_ids: [operator.id] };
+  }
+
+  /** Bitácora administrativa (restringida a VIEW_ACTIVITY). */
+  private loadActivity(): void {
+    this.api.usersActivity().subscribe({
+      next: (rows) => {
+        this.userActivity = rows;
+        this.usersPermissionError = '';
+        this.changeDetector.detectChanges();
+      },
+      error: (err: unknown) => this.usersFail(err),
+    });
+  }
+
+  /** Empleados del parqueadero que todavía no tienen cuenta (restringido). */
+  loadAvailableEmployees(): void {
+    this.api.availableEmployees().subscribe({
+      next: (rows) => {
+        this.availableEmployees = rows;
+        this.usersPermissionError = '';
+        this.changeDetector.detectChanges();
+      },
+      error: (err: unknown) => this.usersFail(err),
+    });
+  }
+
+  /**
+   * Determina la cuenta que actúa sin abrir el módulo de usuarios: los cambios
+   * de estado de celdas se registran con responsable desde el primer minuto.
+   */
+  private initActor(): void {
+    if (this.actorUsername) return;
+    this.api.users({}).subscribe({
+      next: (rows) => this.resolveActor(rows),
+      // Sin cuentas conocidas, el backend registra el cambio como «Sistema».
+      error: () => undefined,
+    });
+  }
+
+  /**
+   * Determina la cuenta que actúa. Sin sesiones, la interfaz usa la primera
+   * cuenta activa con rol Administrador; se puede cambiar desde «Mi perfil».
+   */
+  private resolveActor(rows: UserRoleRow[]): void {
+    if (this.actorManual) {
+      this.api.setActor(this.actorUsername);
+      return;
+    }
+    const admin = rows.find((row) => row.active && row.role_codes.includes('ADMIN'));
+    this.actorUsername = admin ? admin.username : '';
+    this.api.setActor(this.actorUsername);
+  }
+
+  /** Cambia (o cierra) la cuenta que actúa: demuestra la autorización real. */
+  switchActor(username: string): void {
+    this.actorUsername = username;
+    this.actorManual = true;
+    this.api.setActor(username);
+    this.usersPermissionError = '';
+    this.loadUsers(true);
+  }
+
+  /** Errores del módulo: 401/403 alimentan «Acceso restringido». */
+  private usersFail(error: unknown): void {
+    this.busy = false;
+    const response = error as HttpErrorResponse;
+    const detail = response?.error?.detail;
+    if (response?.status === 401 || response?.status === 403) {
+      this.usersPermissionError =
+        typeof detail === 'string' && detail
+          ? detail
+          : 'La gestión de usuarios está reservada al Administrador.';
+      this.changeDetector.detectChanges();
+      return;
+    }
+    this.fail(error);
+  }
+
+  applyUserFilters(): void {
+    this.appliedUserFilters = { ...this.userFilters };
+    this.userPage = 1;
+  }
+
+  clearUserFilters(): void {
+    this.userFilters = { search: '', role: '', status: 'ALL' };
+    this.applyUserFilters();
+  }
+
+  /** Cuentas que coinciden con los filtros aplicados en el directorio. */
+  get filteredUsers(): UserRoleRow[] {
+    const { search, role, status } = this.appliedUserFilters;
+    const term = search.trim().toLowerCase();
+    return this.users.filter((row) => {
+      if (role && !row.role_codes.includes(role)) return false;
+      if (status === 'ACTIVE' && !row.active) return false;
+      if (status === 'INACTIVE' && row.active) return false;
+      if (!term) return true;
+      return [row.employee_name, row.document_number, row.username].some((value) =>
+        value.toLowerCase().includes(term),
+      );
+    });
+  }
+
+  goToUserPage(page: number): void {
+    this.userPage = Math.min(Math.max(1, page), this.userTotalPages);
+  }
+
+  selectUser(userId: number): void {
+    this.selectedUserId = userId;
+  }
+
+  /** Abre el formulario de alta o de edición de una cuenta. */
+  openUserForm(mode: 'create' | 'edit', user?: UserRoleRow): void {
+    this.userFormMode = mode;
+    this.editingUserId = mode === 'edit' && user ? user.id : 0;
+    this.userFormErrors = { employee_id: '', username: '', password: '', role_ids: '' };
+    this.userFormBanner = null;
+    if (mode === 'edit' && user) {
+      const ids = this.userRoles
+        .filter((role) => user.role_codes.includes(role.code))
+        .map((role) => role.id);
+      const operator = this.userRoles.find((role) => role.code === 'OPERATOR');
+      this.userForm = {
+        employee_id: user.employee_id,
+        username: user.username,
+        password: '',
+        role_ids: ids.length ? ids : operator ? [operator.id] : [],
+      };
+    } else {
+      this.userForm = { employee_id: 0, username: '', password: '', role_ids: [] };
+    }
+    this.navigate('users-form');
+  }
+
+  /** Alta de una cuenta partiendo de un empleado concreto. */
+  openCreateUser(employee?: Employee): void {
+    this.openUserForm('create');
+    if (employee) {
+      this.userForm = {
+        ...this.userForm,
+        employee_id: employee.id,
+        username: this.suggestUsername(employee.full_name),
+      };
+    }
+  }
+
+  closeUserForm(): void {
+    this.userFormBanner = null;
+    this.navigate('users');
+  }
+
+  /** El usuario propuesto sigue el formato del diseño: nombre.apellido. */
+  private suggestUsername(fullName: string): string {
+    const parts = fullName
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .split(/\s+/);
+    if (!parts[0]) return '';
+    const raw = parts.length > 1 ? `${parts[0]}.${parts[parts.length - 1]}` : parts[0];
+    return raw.replace(/[^a-z0-9._]/g, '').slice(0, 30);
+  }
+
+  onFormEmployeeChange(): void {
+    this.userFormErrors = { ...this.userFormErrors, employee_id: '' };
+    const employee = this.availableEmployees.find(
+      (item) => item.id === Number(this.userForm.employee_id),
+    );
+    if (!employee || this.userFormMode === 'edit' || this.userForm.username) return;
+    this.userForm = { ...this.userForm, username: this.suggestUsername(employee.full_name) };
+  }
+
+  toggleRole(roleId: number): void {
+    const ids = this.userForm.role_ids;
+    this.userForm = {
+      ...this.userForm,
+      role_ids: ids.includes(roleId) ? ids.filter((id) => id !== roleId) : [...ids, roleId],
+    };
+    this.userFormErrors = { ...this.userFormErrors, role_ids: '' };
+  }
+
+  /** Valida el formulario con los mismos mensajes que el diseño. */
+  private validateUserForm(): boolean {
+    const errors = { employee_id: '', username: '', password: '', role_ids: '' };
+    const username = this.userForm.username.trim();
+    if (this.userFormMode === 'create' && !Number(this.userForm.employee_id)) {
+      errors.employee_id = 'Selecciona un empleado previamente registrado.';
+    }
+    if (!username) {
+      errors.username = 'El usuario es obligatorio.';
+    } else if (!/^[a-z0-9._]{4,30}$/.test(username)) {
+      errors.username =
+        username.length < 4 || username.length > 30
+          ? 'El usuario debe tener entre 4 y 30 caracteres.'
+          : 'Formato inválido: no uses espacios, tildes ni signos no admitidos.';
+    }
+    if (this.userFormMode === 'create' && !this.userForm.password) {
+      errors.password = 'La contraseña es obligatoria para crear la cuenta.';
+    } else if (this.userForm.password && this.userForm.password.length < 12) {
+      errors.password = 'No cumple la política propuesta: usa al menos 12 caracteres.';
+    }
+    if (!this.userForm.role_ids.length) {
+      errors.role_ids = 'Selecciona Administrador o Empleado.';
+    }
+    this.userFormErrors = errors;
+    return !Object.values(errors).some(Boolean);
+  }
+
+  saveUser(): void {
+    if (!this.validateUserForm()) {
+      this.userFormBanner = {
+        kind: 'error',
+        title: 'Corrige los campos obligatorios',
+        body:
+          this.userFormMode === 'create'
+            ? 'No se creó la cuenta. Completa los campos señalados para continuar.'
+            : 'No se guardaron los cambios. Completa los campos señalados para continuar.',
+      };
+      return;
+    }
+    this.busy = true;
+    const username = this.userForm.username.trim();
+    const request =
+      this.userFormMode === 'create'
+        ? this.api.createUser({
+            parking_lot_id: this.selectedLotId,
+            employee_id: Number(this.userForm.employee_id),
+            username,
+            password: this.userForm.password,
+            role_ids: this.userForm.role_ids,
+          })
+        : this.api.updateUser(this.editingUserId, {
+            username,
+            role_ids: this.userForm.role_ids,
+            ...(this.userForm.password ? { password: this.userForm.password } : {}),
+          });
+    request.subscribe({
+      next: (row) => this.onUserSaved(row),
+      error: (err: unknown) => this.onUserSaveFailed(err),
+    });
+  }
+
+  private onUserSaved(row: UserRoleRow): void {
+    this.busy = false;
+    const roles = row.role_names.join(' · ') || 'sin rol';
+    const state = row.active ? 'Activo' : 'Inactiva';
+    this.userFormBanner =
+      this.userFormMode === 'create'
+        ? {
+            kind: 'success',
+            title: '✓ Cuenta creada correctamente',
+            body: `${row.employee_name} ya tiene una cuenta de acceso. Usuario: ${row.username} · Rol: ${roles} · Estado: ${state}.`,
+          }
+        : {
+            kind: 'success',
+            title: `✓ Cuenta de ${row.employee_name.split(' ')[0]} actualizada correctamente`,
+            body: `${row.username} · Rol ${roles} · Estado ${state}. Los cambios pertenecen únicamente a esta cuenta.`,
+          };
+    this.userFormErrors = { employee_id: '', username: '', password: '', role_ids: '' };
+    this.userForm = { ...this.userForm, password: '' };
+    this.usersPermissionError = '';
+    this.navigate('users');
+  }
+
+  private onUserSaveFailed(error: unknown): void {
+    this.busy = false;
+    const response = error as HttpErrorResponse;
+    const detail = response?.error?.detail;
+    const message = typeof detail === 'string' && detail ? detail : '';
+    this.userFormBanner = {
+      kind: 'error',
+      title: this.userFormMode === 'create' ? 'No se creó la cuenta' : 'No se guardaron los cambios',
+      body:
+        message ||
+        (this.userFormMode === 'create'
+          ? 'No se creó la cuenta. Intenta de nuevo.'
+          : 'No se guardaron los cambios. Intenta de nuevo.'),
+    };
+    if (message) this.mapUserFormError(message);
+    if (response?.status === 401 || response?.status === 403) {
+      this.usersPermissionError = message || 'Esta operación está reservada al Administrador.';
+    }
+    this.changeDetector.detectChanges();
+  }
+
+  /** Asocia el mensaje del backend al campo que lo originó. */
+  private mapUserFormError(detail: string): void {
+    const text = detail.toLowerCase();
+    const errors = { ...this.userFormErrors };
+    if (
+      text.includes('usuario') ||
+      text.includes('formato inválido') ||
+      text.includes('caracteres')
+    ) {
+      errors.username = detail;
+    }
+    if (text.includes('contraseña')) errors.password = detail;
+    if (text.includes('rol')) errors.role_ids = detail;
+    if (text.includes('empleado')) errors.employee_id = detail;
+    this.userFormErrors = errors;
+  }
+
+  dismissUserBanner(): void {
+    this.userFormBanner = null;
+  }
+
+  /** Pasa el directorio a la pestaña de confirmación con la cuenta elegida. */
+  requestUserStatusChange(user: UserRoleRow, active: boolean): void {
+    this.statusTarget = user;
+    this.statusResult = null;
+    this.statusWantedActive = active;
+    this.userTab = 'status';
+    this.scrollWorkspaceToTop();
+  }
+
+  cancelStatusChange(): void {
+    this.statusTarget = null;
+    this.statusResult = null;
+  }
+
+  /** Ejecuta la activación o desactivación confirmada. */
+  confirmUserStatus(active: boolean): void {
+    const target = this.statusTarget ?? this.selectedUser;
+    if (!target) return;
+    this.statusTarget = target;
+    this.statusWantedActive = active;
+    this.busy = true;
+    this.api.setUserStatus(target.id, active).subscribe({
+      next: (row) => {
+        this.busy = false;
+        this.statusResult = { username: row.username, active: row.active };
+        this.usersPermissionError = '';
+        this.loadUsers();
+        this.done(
+          `Cuenta ${row.active ? 'activada' : 'desactivada'}: ${row.username}. El historial se conserva.`,
+        );
+      },
+      error: (err: unknown) => this.usersFail(err),
+    });
+  }
+
+  /** Comprueba credenciales reales sin crear sesión. */
+  runLoginCheck(state: LoginState): void {
+    if (!state.username.trim() || !state.password) {
+      this.setLoginState(state.id, { status: 'REQUIRED', message: '' });
+      return;
+    }
+    this.api
+      .accessCheck({
+        parking_lot_id: this.selectedLotId,
+        username: state.username.trim(),
+        password: state.password,
+      })
+      .subscribe({
+        next: (result) => this.setLoginState(state.id, { status: result.status, message: result.message }),
+        error: (err: unknown) => this.fail(err),
+      });
+  }
+
+  onLoginField(state: LoginState, field: 'username' | 'password', value: string): void {
+    this.loginStates = this.loginStates.map((item) =>
+      item.id === state.id ? { ...item, [field]: value } : item,
+    );
+  }
+
+  private setLoginState(id: LoginState['id'], patch: Partial<LoginState>): void {
+    this.loginStates = this.loginStates.map((item) =>
+      item.id === id ? { ...item, ...patch } : item,
+    );
+    this.changeDetector.detectChanges();
+  }
+
+  /** Indicadores del directorio, calculados con los datos reales. */
+  get userStats(): { label: string; value: number; hint: string }[] {
+    const total = this.users.length;
+    const active = this.users.filter((row) => row.active).length;
+    return [
+      { label: 'Cuentas de acceso', value: total, hint: 'Vinculadas a empleados registrados' },
+      { label: 'Activas', value: active, hint: 'Pueden solicitar inicio de sesión' },
+      { label: 'Inactivas', value: total - active, hint: 'Acceso no permitido' },
+      {
+        label: 'Empleados sin cuenta',
+        value: this.employeesWithoutAccount.length,
+        hint: 'Disponible para crear acceso',
+      },
+    ];
+  }
+
+  /** Empleados del parqueadero que aún no tienen cuenta de acceso. */
+  get employeesWithoutAccount(): Employee[] {
+    const withAccount = new Set(this.users.map((row) => row.employee_id));
+    return this.employees.filter((employee) => !withAccount.has(employee.id));
+  }
+
+  get userTotalPages(): number {
+    return Math.max(1, Math.ceil(this.filteredUsers.length / this.userPageSize));
+  }
+
+  get pagedUsers(): UserRoleRow[] {
+    const start = (this.userPage - 1) * this.userPageSize;
+    return this.filteredUsers.slice(start, start + this.userPageSize);
+  }
+
+  get selectedUser(): UserRoleRow | undefined {
+    return this.users.find((row) => row.id === this.selectedUserId);
+  }
+
+  /** Cuenta que actúa en la interfaz. */
+  get actorAccount(): UserRoleRow | undefined {
+    return this.users.find((row) => row.username === this.actorUsername);
+  }
+
+  get activeAccounts(): UserRoleRow[] {
+    return this.users.filter((row) => row.active);
+  }
+
+  /** Roles seleccionados en el formulario. */
+  get selectedRoles(): Role[] {
+    return this.userRoles.filter((role) => this.userForm.role_ids.includes(role.id));
+  }
+
+  /** Descripción de permisos de la selección actual (caja azul del diseño). */
+  get selectedRoleDescription(): string {
+    const selected = this.selectedRoles;
+    if (!selected.length) return 'Selecciona al menos un rol para ver sus permisos.';
+    return selected.map((role) => role.description).join(' ');
+  }
+
+  get selectedRoleTitle(): string {
+    const names = this.selectedRoles.map((role) => role.name);
+    if (names.length === 1) return `Permisos del rol ${names[0]}`;
+    if (!names.length) return 'Permisos del rol';
+    return `Permisos combinados · ${names.join(' + ')}`;
+  }
+
+  /** Nota «Si seleccionas Administrador» del formulario de edición. */
+  get adminRoleNote(): boolean {
+    return this.selectedRoles.some((role) => role.code === 'ADMIN');
+  }
+
+  /** Etiqueta de rol de una fila del directorio. */
+  roleLabel(row: UserRoleRow): string {
+    return row.role_names.length ? row.role_names.join(' · ') : 'Sin rol';
+  }
+
+  /** Descripción de los roles de una cuenta (consulta de solo lectura). */
+  roleDescription(row: UserRoleRow): string {
+    const descriptions = this.userRoles
+      .filter((role) => row.role_codes.includes(role.code))
+      .map((role) => role.description);
+    return descriptions.length ? descriptions.join(' ') : '';
+  }
+
+  get recentUserActivity(): UserActivityRow[] {
+    return this.userActivity.slice(0, 5);
+  }
+
+  /** Estado del buscador: reproduce el resumen «Rol: … · Estado: …». */
+  get userFilterSummary(): string {
+    const role = this.userRoles.find((item) => item.code === this.appliedUserFilters.role);
+    const states: Record<UserStatusFilter, string> = {
+      ALL: 'Todos los estados',
+      ACTIVE: 'Activo',
+      INACTIVE: 'Inactivo',
+    };
+    const parts = [
+      `Rol: ${role ? role.name : 'Todos los roles'}`,
+      `Estado: ${states[this.appliedUserFilters.status]}`,
+      `${this.filteredUsers.length} ${this.filteredUsers.length === 1 ? 'resultado' : 'resultados'}`,
+    ];
+    return parts.join(' · ');
+  }
+
+  /** Matriz «Permisos por rol» servida con los permisos reales de la API. */
+  get permissionMatrix(): { label: string; cells: { role: Role; text: string; allowed: boolean }[] }[] {
+    return this.permissionFunctions.map((fn) => ({
+      label: fn.label,
+      cells: this.userRoles.map((role) => {
+        const allowed = role.permissions.includes(fn.code);
+        return {
+          role,
+          text: allowed ? (fn.code === 'VIEW_ACTIVITY' ? '✓ Solo lectura' : '✓ Permitido') : '— Restringido',
+          allowed,
+        };
+      }),
+    }));
+  }
+
+  /** Nombre del rol seleccionado en el select único del formulario. */
+  get singleRoleValue(): string {
+    if (this.userForm.role_ids.length !== 1) return this.userForm.role_ids.length > 1 ? '__multi__' : '';
+    const role = this.userRoles.find((item) => item.id === this.userForm.role_ids[0]);
+    return role ? role.code : '';
+  }
+
+  /** El select del diseño aplica un rol único; los chips sostienen la relación N:M. */
+  setSingleRole(code: string): void {
+    if (code === '__multi__') return;
+    if (!code) {
+      this.userForm = { ...this.userForm, role_ids: [] };
+      this.userFormErrors = { ...this.userFormErrors, role_ids: 'Selecciona Administrador o Empleado.' };
+      return;
+    }
+    const role = this.userRoles.find((item) => item.code === code);
+    if (role) {
+      this.userForm = { ...this.userForm, role_ids: [role.id] };
+      this.userFormErrors = { ...this.userFormErrors, role_ids: '' };
+    }
+  }
+
+  /** Primer nombre de la cuenta que actúa (títulos de confirmación). */
+  get statusFirstName(): string {
+    const name = this.statusAccount?.employee_name ?? '';
+    return name.split(' ')[0] || 'esta cuenta';
+  }
+
+  get deactivationAvailable(): boolean {
+    return !!this.statusAccount?.active;
+  }
+
+  get activationAvailable(): boolean {
+    return !!this.statusAccount && !this.statusAccount.active;
+  }
+
+  /** Kicker del panel de perfil según el permiso real de la cuenta. */
+  get routeKicker(): string {
+    return this.usersPermissionError
+      ? 'Perfil empleado · Ruta de administración'
+      : 'Perfil actual · Ruta de administración';
+  }
+
+  get profileKicker(): string {
+    if (!this.actorAccount) return 'Perfil actual · Sin cuenta activa';
+    return `Perfil actual · ${this.roleLabel(this.actorAccount)}`;
+  }
+
+  /** Kicker del formulario de cuenta: nombra al empleado cuando ya está elegido. */
+  get userFormKicker(): string {
+    if (this.userFormMode === 'create') {
+      const employee = this.availableEmployees.find((item) => item.id === this.userForm.employee_id);
+      return employee ? `Creación · ${employee.full_name}` : 'Creación · Cuenta nueva';
+    }
+    const name = this.editingUser?.employee_name ?? 'Cuenta';
+    return `Edición · ${name}`;
+  }
+
+  /** Permisos concretos de la cuenta que actúa. */
+  get actorPermissions(): string[] {
+    const account = this.actorAccount;
+    if (!account) return [];
+    return this.userRoles
+      .filter((role) => account.role_codes.includes(role.code))
+      .flatMap((role) => role.permissions);
+  }
+
+  /** Primer nombre de una cuenta (título de la acción de guardado). */
+  userFirstName(row: UserRoleRow | undefined): string {
+    return row?.employee_name.split(' ')[0] ?? 'esta cuenta';
+  }
+
+  /** Vuelve al resumen operativo desde el estado de acceso restringido. */
+  backToDashboard(): void {
+    this.navigate('dashboard');
+  }
+
+  /** Cuenta en edición en el formulario. */
+  get editingUser(): UserRoleRow | undefined {
+    return this.users.find((row) => row.id === this.editingUserId);
+  }
+
+  /** Cuenta sobre la que se está confirmando un cambio de estado. */
+  get statusAccount(): UserRoleRow | undefined {
+    return this.statusTarget ?? this.selectedUser;
+  }
+
+  /** Administrador de referencia para el estado «Acceso restringido». */
+  get adminReference(): string {
+    const admin = this.users.find((row) => row.active && row.role_codes.includes('ADMIN'));
+    return admin ? admin.employee_name : 'el administrador del parqueadero';
+  }
+
+  /** Pie del directorio: total del parqueadero y filtros aplicados. */
+  get userDirectorySummary(): string {
+    const total = this.users.length;
+    const shown = this.filteredUsers.length;
+    const label = this.userFiltersAppliedLabel;
+    if (shown === total) {
+      return `${total} ${total === 1 ? 'cuenta' : 'cuentas'} · ${label}`;
+    }
+    return `${shown} de ${total} ${total === 1 ? 'cuenta' : 'cuentas'} · ${label}`;
+  }
+
+  /** Resumen de filtros aplicados en el pie del directorio. */
+  get userFiltersAppliedLabel(): string {
+    const { search, role, status } = this.appliedUserFilters;
+    const bits: string[] = [];
+    if (search) bits.push(`“${search}”`);
+    if (role) {
+      const found = this.userRoles.find((item) => item.code === role);
+      bits.push(`rol ${found ? found.name : role}`);
+    }
+    if (status !== 'ALL') bits.push(status === 'ACTIVE' ? 'solo activas' : 'solo inactivas');
+    return bits.length ? bits.join(' · ') : 'Sin filtros aplicados';
+  }
+
+  /** Kicker de cada panel de acceso. */
+  loginKicker(state: LoginState): string {
+    const labels: Record<LoginState['status'], string> = {
+      REQUIRED: 'ACCESO · CAMPOS REQUERIDOS',
+      BAD_CREDENTIALS: 'ACCESO · CREDENCIALES INCORRECTAS',
+      INACTIVE: 'ACCESO · CUENTA INACTIVA',
+      OK: 'ACCESO · COMPROBACIÓN VERIFICADA',
+    };
+    return labels[state.status];
+  }
+
+  loginTitle(state: LoginState): string {
+    const titles: Record<LoginState['status'], string> = {
+      REQUIRED: 'Completa los datos de acceso',
+      BAD_CREDENTIALS: 'No pudimos iniciar sesión',
+      INACTIVE: 'Cuenta inactiva · Acceso no permitido',
+      OK: 'Credenciales verificadas',
+    };
+    return titles[state.status];
+  }
+
+  loginBody(state: LoginState): string {
+    if (state.message) return state.message;
+    const bodies: Record<LoginState['status'], string> = {
+      REQUIRED: 'Los dos campos son obligatorios. No se ha iniciado sesión.',
+      BAD_CREDENTIALS: 'El usuario o la contraseña no coinciden. Verifica los datos e inténtalo de nuevo.',
+      INACTIVE: 'Contacta al administrador para revisar el estado de tu cuenta. No se inició sesión.',
+      OK: 'La comprobación no inicia sesión en esta interfaz.',
+    };
+    return bodies[state.status];
+  }
+
+  loginAction(state: LoginState): string {
+    const actions: Record<LoginState['status'], string> = {
+      REQUIRED: 'Iniciar sesión',
+      BAD_CREDENTIALS: 'Volver a intentar',
+      INACTIVE: 'Volver al acceso',
+      OK: 'Comprobar de nuevo',
+    };
+    return actions[state.status];
+  }
+
+  /** Filas de la matriz «Permisos por rol». */
+  readonly permissionFunctions: { code: string; label: string }[] = [
+    { code: 'OPERATE', label: 'Registrar ingresos, salidas, pagos y novedades' },
+    { code: 'VIEW_AVAILABILITY', label: 'Consultar disponibilidad y celdas compatibles' },
+    { code: 'MANAGE_ACCOUNTS', label: 'Crear, editar, activar o desactivar cuentas' },
+    { code: 'MANAGE_STRUCTURE', label: 'Gestionar sedes, zonas y configuración de celdas' },
+    { code: 'VIEW_ACTIVITY', label: 'Consultar bitácora administrativa' },
+  ];
 
   private reloadDashboard(): void {
     this.api.dashboard().subscribe({

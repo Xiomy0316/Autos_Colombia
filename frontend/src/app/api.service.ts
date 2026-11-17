@@ -27,7 +27,12 @@ export interface Vehicle {
 export interface Cell {
   id: number; zone_id: number; zone_name: string; site_id: number; site_name: string; code: string;
   operational_status: string; occupied: boolean; vehicle_id: number | null; vehicle_plate: string | null;
-  compatible_types: VehicleType[];
+  description: string; compatible_types: VehicleType[];
+}
+/** Fila del historial de cambios de estado de una celda (`cell_status_events`). */
+export interface CellStatusEvent {
+  id: number; cell_id: number; from_status: string; to_status: string;
+  reason: string; actor: string; created_at: string;
 }
 export interface Movement { id: number; vehicle_id: number; plate: string; brand: string; color: string; type_name: string; customer_name: string; cell_id: number; cell_code: string; zone_name?: string; site_name?: string; entered_at: string; exited_at: string | null; entry_employee: string | null; exit_employee: string | null; }
 export interface OccupancyGroup { total: number; occupied: number; maintenance: number; available: number; }
@@ -76,6 +81,27 @@ export interface ReportMovement {
   cell_code: string; zone_name: string; entry_employee: string | null; exit_employee: string | null;
   state: 'ACTIVO' | 'CERRADO';
 }
+/** Catálogo de roles servido por la API con los permisos que esta sí aplica. */
+export interface Role {
+  id: number; code: string; name: string; description: string; permissions: string[];
+}
+/** Fila del directorio de cuentas (vista `v_user_roles`, nunca expone el hash). */
+export interface UserRoleRow {
+  id: number; parking_lot_id: number; employee_id: number; username: string; active: boolean;
+  employee_name: string; document_number: string; role_codes: string[]; role_names: string[];
+  created_at: string | null; updated_at: string | null; last_login: string | null;
+}
+/** Fila de la bitácora administrativa (`user_activity`). */
+export interface UserActivityRow {
+  id: number; occurred_at: string; actor: string; action: string; operation: string;
+  detail: string; username: string;
+}
+export interface AccessCheckResult {
+  status: 'OK' | 'BAD_CREDENTIALS' | 'INACTIVE';
+  message: string;
+  username?: string;
+  roles?: string;
+}
 export interface Report {
   parking_lot: { id: number; name: string };
   report_date: string;
@@ -101,6 +127,8 @@ export class ApiService {
   /** En desarrollo apunta a la API local; en producción a `/api` (nginx). */
   private readonly base = environment.apiUrl;
   private activeLotId = 1;
+  /** Cuenta administradora que realiza la operación (cabecera X-Actor-Username). */
+  private actor = '';
 
   setParkingLot(id: number): void { this.activeLotId = id; }
   private scopedParams(values: Record<string, string | number | boolean> = {}): HttpParams {
@@ -132,8 +160,17 @@ export class ApiService {
   vehicles(search = ''): Observable<Vehicle[]> { return this.http.get<Vehicle[]>(`${this.base}/vehicles`, { params: this.scopedParams(search ? { search } : {}) }); }
   createVehicle(payload: { parking_lot_id: number; customer_id: number; vehicle_type_id: number; plate: string; brand: string; color: string }): Observable<Vehicle> { return this.http.post<Vehicle>(`${this.base}/vehicles`, payload); }
   cells(): Observable<Cell[]> { return this.http.get<Cell[]>(`${this.base}/cells`, { params: this.scopedParams() }); }
-  createCell(payload: { zone_id: number; code: string; compatible_type_ids: number[] }): Observable<Cell> { return this.http.post<Cell>(`${this.base}/cells`, payload, { params: this.scopedParams() }); }
-  updateCellStatus(id: number, operational_status: string): Observable<Cell> { return this.http.patch<Cell>(`${this.base}/cells/${id}/status`, { operational_status }); }
+  createCell(payload: { zone_id: number; code: string; compatible_type_ids: number[]; description?: string }): Observable<Cell> { return this.http.post<Cell>(`${this.base}/cells`, payload, { params: this.scopedParams() }); }
+  updateCell(id: number, payload: { zone_id?: number; code?: string; compatible_type_ids?: number[]; description?: string }): Observable<Cell> {
+    return this.http.patch<Cell>(`${this.base}/cells/${id}`, payload, { params: this.scopedParams() });
+  }
+  updateCellStatus(id: number, operational_status: string, reason = ''): Observable<Cell> {
+    return this.http.patch<Cell>(`${this.base}/cells/${id}/status`, { operational_status, reason },
+      { params: this.scopedParams(), headers: this.actorHeaders() });
+  }
+  cellStatusEvents(id: number, limit = 5): Observable<CellStatusEvent[]> {
+    return this.http.get<CellStatusEvent[]>(`${this.base}/cells/${id}/status-events`, { params: this.scopedParams({ limit }) });
+  }
   sites(): Observable<Site[]> { return this.http.get<Site[]>(`${this.base}/sites`, { params: this.scopedParams() }); }
   createSite(payload: { parking_lot_id: number; name: string; address: string }): Observable<Site> { return this.http.post<Site>(`${this.base}/sites`, payload); }
   zones(siteId?: number): Observable<Zone[]> { return this.http.get<Zone[]>(`${this.base}/zones`, { params: this.scopedParams(siteId ? { site_id: siteId } : {}) }); }
@@ -177,4 +214,37 @@ export class ApiService {
   }
   novelties(): Observable<Novelty[]> { return this.http.get<Novelty[]>(`${this.base}/novelties`, { params: this.scopedParams() }); }
   createNovelty(payload: { vehicle_id: number; category: string; description: string }): Observable<Novelty> { return this.http.post<Novelty>(`${this.base}/novelties`, payload); }
+
+  /* ------------------------------------------------------------------ */
+  /* Administración · Usuarios: cuentas de acceso, roles y bitácora      */
+  /* ------------------------------------------------------------------ */
+  /** Cuenta que realiza la operación (no hay sesiones: la API la recibe en X-Actor-Username). */
+  setActor(username: string): void { this.actor = username; }
+  private actorHeaders(): Record<string, string> {
+    return this.actor ? { 'X-Actor-Username': this.actor } : {};
+  }
+
+  roles(): Observable<Role[]> { return this.http.get<Role[]>(`${this.base}/roles`); }
+  users(filters: { search?: string; role?: string; status?: string } = {}): Observable<UserRoleRow[]> {
+    return this.http.get<UserRoleRow[]>(`${this.base}/users`, { params: this.scopedParams(filters) });
+  }
+  availableEmployees(): Observable<Employee[]> {
+    return this.http.get<Employee[]>(`${this.base}/users/employees-available`, { params: this.scopedParams(), headers: this.actorHeaders() });
+  }
+  usersActivity(limit = 50): Observable<UserActivityRow[]> {
+    return this.http.get<UserActivityRow[]>(`${this.base}/users/activity`, { params: this.scopedParams({ limit }), headers: this.actorHeaders() });
+  }
+  createUser(payload: { parking_lot_id: number; employee_id: number; username: string; password: string; role_ids: number[] }): Observable<UserRoleRow> {
+    return this.http.post<UserRoleRow>(`${this.base}/users`, payload, { headers: this.actorHeaders() });
+  }
+  updateUser(id: number, payload: { username?: string; password?: string; role_ids?: number[] }): Observable<UserRoleRow> {
+    return this.http.patch<UserRoleRow>(`${this.base}/users/${id}`, payload, { params: this.scopedParams(), headers: this.actorHeaders() });
+  }
+  setUserStatus(id: number, active: boolean): Observable<UserRoleRow> {
+    return this.http.patch<UserRoleRow>(`${this.base}/users/${id}/status`, { active }, { params: this.scopedParams(), headers: this.actorHeaders() });
+  }
+  /** Comprueba credenciales sin crear sesión. */
+  accessCheck(payload: { parking_lot_id: number; username: string; password: string }): Observable<AccessCheckResult> {
+    return this.http.post<AccessCheckResult>(`${this.base}/users/access-check`, payload);
+  }
 }

@@ -1479,6 +1479,213 @@ textarea {
 }
 
 /* ------------------------------------------------------------------ */
+/* Inventario y capacidad · filtros, tabla y panel lateral             */
+/* ------------------------------------------------------------------ */
+.inv-filters {
+  flex-wrap: wrap;
+}
+.inv-filter-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+.map-filter--status {
+  width: 156px;
+}
+.inv-filters .map-filter--site,
+.inv-filters .map-filter--zone,
+.inv-filters .map-filter--type {
+  width: 160px;
+}
+.inv-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+.inv-table-panel {
+  flex: 1;
+}
+/* El lateral es más ancho para que «Mantenimiento» no quede recortado. */
+.inv-side {
+  display: flex;
+  width: 440px;
+  flex: none;
+  flex-direction: column;
+  gap: 20px;
+}
+/* Red de seguridad: si una fila no cabe, se desplaza en vez de recortarse. */
+.inv-layout .data-table {
+  overflow-x: auto;
+}
+.inv-capacity th {
+  padding: 0 8px;
+}
+.inv-capacity td {
+  padding: 10px 8px;
+}
+.inv-capacity th:not(:first-child),
+.inv-capacity td:not(:first-child) {
+  text-align: right;
+}
+.inv-capacity td:not(:first-child) {
+  white-space: nowrap;
+}
+.inv-capacity-total {
+  background: var(--surface);
+}
+.inv-row {
+  cursor: pointer;
+}
+.inv-row--selected {
+  background: var(--surface);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Registro y configuración · cuatro paneles                           */
+/* ------------------------------------------------------------------ */
+.reg-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid #cfe0ff;
+  border-radius: 10px;
+  background: #eaf1ff;
+  color: var(--primary);
+}
+.reg-intro strong {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.reg-intro span {
+  font-size: 11px;
+  line-height: 1.5;
+}
+.reg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.reg-panel {
+  gap: 16px;
+}
+.reg-kicker {
+  margin: 0;
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+/* Las píldoras de estado no deben estirarse dentro del panel. */
+.reg-panel .map-pill {
+  align-self: flex-start;
+}
+.reg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.type-options.campo--error legend {
+  color: var(--danger);
+}
+.type-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.type-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.type-chip input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+}
+.type-chip--on {
+  border-color: var(--primary);
+  background: #eaf1ff;
+  color: var(--primary);
+  font-weight: 600;
+}
+.reg-notice {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.reg-notice span {
+  display: block;
+  margin-top: 4px;
+  opacity: 0.85;
+}
+.reg-notice--ok {
+  background: #e9f6ef;
+  color: #0f7b46;
+}
+.reg-notice--warn {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.reg-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.reg-note strong {
+  font-weight: 700;
+}
+.reg-note--warn {
+  border-color: #f0d8a6;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.reg-note--info {
+  border-color: #cfe0ff;
+  background: #eaf1ff;
+  color: var(--primary);
+}
+.reg-last {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.reg-last span {
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------------ */
 /* Listas auxiliares                                                   */
 /* ------------------------------------------------------------------ */
 .type-capacity-row {
@@ -3208,6 +3415,358 @@ textarea {
 }
 
 /* ------------------------------------------------------------------ */
+/* Módulo de administración · Usuarios                                 */
+/* ------------------------------------------------------------------ */
+
+/* Indicadores del directorio · 4 tarjetas */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 20px;
+}
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--white);
+}
+.stat-label {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+.stat-value {
+  color: var(--primary);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.stat-hint {
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* Filtros con etiqueta superior */
+.filter-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+.filter-field > label {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+.filter-field--grow {
+  flex: 1;
+}
+.filter-field--grow .filter-search {
+  max-width: none;
+  width: 100%;
+}
+.filter-field--action {
+  justify-content: flex-end;
+}
+.filter-field--action > span {
+  font-size: 12px;
+  visibility: hidden;
+}
+.user-filters {
+  align-items: flex-end;
+}
+
+/* Fila seleccionada y etiqueta «Actúa ahora» */
+.row--selected td {
+  background: #f5f9ff;
+}
+.row-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #eaf1ff;
+  color: var(--primary);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.table-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.table-sep {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+/* Estado vacío del directorio */
+.empty-search-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.empty-search-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.empty-search-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.empty-search-copy p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.filter-chip {
+  align-self: flex-start;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Directorio · consulta + empleados sin cuenta */
+.users-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.account-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.account-head > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.account-head strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+.account-head span {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+/* Confirmaciones de estado · 2 columnas */
+.confirm-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+
+/* Comprobación de acceso · 3 columnas */
+.login-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.login-panel .stack-form {
+  gap: 12px;
+}
+.login-panel .button {
+  width: 100%;
+}
+.login-panel .panel-head > div {
+  flex: 1 1 auto;
+}
+.login-panel .panel-kicker {
+  flex: 1 1 auto;
+  text-align: right;
+}
+
+/* Perfil · 2 columnas */
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.panel > .chip {
+  align-self: flex-start;
+}
+
+/* Chips de rol (relación N:M) */
+.role-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.role-chip {
+  display: inline-flex;
+  width: auto;
+  min-height: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.role-chip:hover {
+  border-color: #c3d0e2;
+  background: var(--surface);
+}
+.role-chip--on {
+  border-color: var(--primary);
+  background: #eaf1ff;
+  color: var(--primary);
+}
+
+/* Caja de permisos del formulario */
+.permissions-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid #cfe0ff;
+  border-radius: 10px;
+  background: #f2f7ff;
+}
+.permissions-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+.permissions-body {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* Valor de solo lectura (empleado vinculado) */
+.readonly-value {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+/* Chips informativos */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.chip--info {
+  border-color: #cfe0ff;
+  background: #eaf1ff;
+  color: var(--primary);
+}
+
+/* Campos y ayudas con error */
+.campo--error input,
+.campo--error select {
+  border-color: var(--danger);
+}
+.campo--error input:focus,
+.campo--error select:focus {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgb(217 45 32 / 12%);
+}
+.field-hint--error {
+  color: var(--danger);
+}
+
+/* Acción peligrosa */
+.button--danger {
+  background: var(--danger);
+  color: #fff;
+}
+.button--danger:not(:disabled):hover {
+  background: #b42318;
+}
+
+/* Matriz de permisos */
+.cell-ok {
+  color: #187453;
+  font-weight: 600;
+}
+.cell-blocked {
+  color: var(--ink-muted);
+}
+
+/* Nota al pie del módulo */
+.message--disclaimer {
+  border-style: dashed;
+}
+
+/* Ajustes del formulario de cuenta · ancho de tarjeta acotado como en Figma */
+.form-panel {
+  max-width: 680px;
+}
+.form-panel .stack-form {
+  margin-top: 16px;
+}
+.form-panel > .chip {
+  margin-top: 12px;
+}
+
+@media (max-width: 1280px) {
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .login-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1080px) {
+  .users-split,
+  .confirm-grid,
+  .profile-grid,
+  .empty-search-grid,
+  .login-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .user-filters {
+    flex-wrap: wrap;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Adaptación responsiva                                               */
 /* ------------------------------------------------------------------ */
 @media (max-width: 1280px) {
@@ -3217,6 +3776,15 @@ textarea {
 }
 
 @media (max-width: 1080px) {
+  .reg-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .inv-layout {
+    flex-direction: column;
+  }
+  .inv-side {
+    width: 100%;
+  }
   .split-columns {
     grid-template-columns: minmax(0, 1fr);
   }

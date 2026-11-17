@@ -26,14 +26,22 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.database import Base, engine  # noqa: E402
 from app.main import app, seed_database  # noqa: E402
+from app.views import drop_reporting_views  # noqa: E402
 
 
-@pytest.fixture
-def client():
+def reset_schema() -> None:
+    """Retira la vista propia antes de `drop_all()`: si no, PG bloquea el DROP."""
+    with engine.begin() as connection:
+        drop_reporting_views(connection)
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     with Session(bind=engine) as db:
         seed_database(db)
+
+
+@pytest.fixture
+def client():
+    reset_schema()
     with TestClient(app) as test_client:
         yield test_client
-    Base.metadata.drop_all(bind=engine)
+    reset_schema()
