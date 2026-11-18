@@ -1,44 +1,33 @@
 # =============================================================================
-# Autos Colombia — ejecución local con la MISMA arquitectura que en Render:
-# PostgreSQL + API (FastAPI) + Interfaz (nginx haciendo de reverse proxy de /api).
+# Autos Colombia — despliegue con Docker: PostgreSQL externo (Neon) + API
+# (FastAPI) + Interfaz (nginx haciendo de reverse proxy de /api).
+#
+# La cadena de conexión se toma del entorno (.env en local, variables de la
+# plataforma en Dokploy/Render). No se levanta PostgreSQL dentro de Docker.
 #
 #   docker compose up --build
-#   Interfaz: http://localhost:8080   ·   API: http://localhost:8000/api/health
 #
 # Requiere Docker Desktop (o Docker Engine + plugin compose). Si prefieres
-# trabajar como hasta ahora con ng serve + uvicorn, sigue usando ./run-local.sh.
+# trabajar con ng serve + uvicorn, sigue usando ./run-local.sh.
 # =============================================================================
 
 name: autos-colombia
 
 services:
-  db:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: autos
-      POSTGRES_PASSWORD: autos
-      POSTGRES_DB: autos_colombia
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U autos -d autos_colombia"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-
   backend:
     build:
       context: ./backend
     environment:
-      DATABASE_URL: postgresql+psycopg://autos:autos@db:5432/autos_colombia
+      # Pooler de Neon para el tráfico normal de la aplicación.
+      DATABASE_URL: ${DATABASE_URL:?Define DATABASE_URL con la cadena del pooler de Neon}
+      # Conexión directa usada por Alembic para las migraciones (evita el error
+      # de prepared statements del pooler). Si falta, se usa DATABASE_URL.
+      DATABASE_URL_UNPOOLED: ${DATABASE_URL_UNPOOLED:-}
       # Mismo contrato que en Render: la app escucha en ${PORT}.
       PORT: "8000"
       WEB_CONCURRENCY: "1"
     expose:
       - "8000"
-    depends_on:
-      db:
-        condition: service_healthy
 
   frontend:
     build:
@@ -51,6 +40,3 @@ services:
       - "8080"
     depends_on:
       - backend
-
-volumes:
-  pgdata:
