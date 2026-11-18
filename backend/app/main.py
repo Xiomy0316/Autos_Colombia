@@ -5,13 +5,17 @@ from decimal import Decimal
 import re
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from .database import Base, engine, get_db
+from .auth import (
+    Principal, authenticate, build_principal, current_principal, decode_token,
+    permit, router as auth_router,
+)
+from .database import Base, SessionLocal, engine, get_db
 from .models import (
     Cell, CellStatusEvent, Customer, Employee, MonthlyContract, MonthlyTariff,
     Movement, Novelty, ParkingLot, Payment, Role, Shift, Site, UserAccount,
@@ -24,11 +28,15 @@ from .schemas import (
     UserAccessCheck, UserCreate, UserStatusUpdate, UserUpdate, VehicleCreate,
     ZoneCreate,
 )
+from .rbac import (
+    ACTIVITY_LABELS, PERMISSION_FUNCTIONS, ROLE_ADMIN, ROLE_CATALOG,
+    ROLE_EMPLOYEE, ROLE_PERMISSIONS,
+)
 from .security import hash_password, verify_password
 from .views import ensure_reporting_views
 
-#: Cabecera con la cuenta que realiza la operación. Este proyecto no tiene
-#: sesiones: la interfaz envía el administrador activo en esta cabecera.
+#: Cabecera heredada. Se acepta pero NUNCA se usa para autorizar: la identidad
+#: sale del token firmado (ver `app.auth.authenticate`).
 ACTOR_HEADER = "X-Actor-Username"
 
 
@@ -44,6 +52,30 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Autos Colombia API", version="0.1.0", description="Gestión configurable de parqueaderos mensuales", lifespan=lifespan)
+@app.middleware("http")
+async def attach_session_context(request: Request, call_next):
+    """Fija la sesión en el contexto de la request antes de dependencias/vistas.
+
+    FastAPI resuelve las dependencias y el endpoint en contextos distintos; un
+    ContextVar fijado solo en la dependencia no llega al cuerpo del endpoint.
+    Este middleware garantiza que `resolve_parking_lot`, la bitácora y las
+    comprobaciones heredadas vean al mismo usuario autenticado.
+    """
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        payload = decode_token(token.strip())
+        if payload:
+            with SessionLocal() as session:
+                user = session.get(UserAccount, payload.get("uid"))
+                if user and user.active and user.username == payload.get("sub") \
+                        and user.parking_lot_id == payload.get("lot"):
+                    current_principal.set(build_principal(session, user))
+    return await call_next(request)
+
+
+# Rutas públicas de login y de sesión (perfil, cambio de contraseña, logout).
+app.include_router(auth_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
@@ -129,42 +161,25 @@ def shift_payload(shift: Shift) -> dict[str, Any]:
     }
 
 
-#: Catálogo de roles. Los códigos son los mismos que Autos Colombia ya usa en
-#: `employees.role` (`ADMIN` y `OPERATOR`) para no duplicar roles ni alterar los
-#: permisos actuales; `name` es la etiqueta mostrada por el módulo Usuarios.
-#: La misma lista (congelada) vive en la migración 9d21f4c7ab05.
-ROLE_CATALOG: tuple[dict[str, Any], ...] = (
-    {
-        "code": "ADMIN",
-        "name": "Administrador",
-        "description": (
-            "Incluye operación, gestión de usuarios, sedes, zonas, celdas y "
-            "consulta de actividad administrativa."
-        ),
-        "sort": 1,
-    },
-    {
-        "code": "OPERATOR",
-        "name": "Empleado",
-        "description": (
-            "Registrar ingresos, salidas, pagos y novedades; consultar "
-            "disponibilidad. No administra usuarios, sedes, zonas ni celdas."
-        ),
-        "sort": 2,
-    },
-)
-
-
+#: El catálogo canónico (ADMINISTRADOR / EMPLEADO) y sus permisos viven en
+#: `app.rbac`. Se importan arriba para que el frontend y la API usen la misma
+#: nomenclatura. `seed_roles` también normaliza códigos heredados.
 def seed_roles(db: Session) -> None:
-    """Asegura el catálogo de roles sin duplicarlo ni alterar lo existente."""
-    added = False
+    """Asegura exactamente dos roles; renombra los códigos heredados sin borrar filas."""
+    changed = False
+    for old_code, new_code in (("ADMIN", ROLE_ADMIN), ("OPERATOR", ROLE_EMPLOYEE)):
+        old = db.scalar(select(Role).where(Role.code == old_code))
+        new = db.scalar(select(Role.id).where(Role.code == new_code))
+        if old and not new:
+            old.code = new_code
+            changed = True
     for entry in ROLE_CATALOG:
         exists = db.scalar(select(Role.id).where(Role.code == entry["code"]))
         if exists:
             continue
         db.add(Role(**entry))
-        added = True
-    if added:
+        changed = True
+    if changed:
         db.commit()
 
 
@@ -248,13 +263,13 @@ def parking_lot_summary(db: Session, lot: ParkingLot) -> dict[str, Any]:
     }
 
 
-@app.get("/api/parking-lots")
+@app.get("/api/parking-lots", dependencies=[Depends(permit("VIEW_AVAILABILITY"))])
 def list_parking_lots(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     lots = db.scalars(select(ParkingLot).order_by(ParkingLot.active.desc(), ParkingLot.name)).all()
     return [parking_lot_summary(db, lot) for lot in lots]
 
 
-@app.post("/api/parking-lots", status_code=201)
+@app.post("/api/parking-lots", status_code=201, dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def create_parking_lot(payload: ParkingLotCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Crea un parqueadero vacío: sin sedes, zonas, celdas ni tarifas."""
     lot = ParkingLot(
@@ -264,16 +279,19 @@ def create_parking_lot(payload: ParkingLotCreate, db: Session = Depends(get_db))
         address=payload.address.strip(),
     )
     db.add(lot)
+    db.flush()
+    audit_admin(db, "PARKING_LOT_CREATED", lot.name)
     db.commit()
     db.refresh(lot)
     return parking_lot_summary(db, lot)
 
 
-@app.patch("/api/parking-lots/{lot_id}")
+@app.patch("/api/parking-lots/{lot_id}", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def update_parking_lot(lot_id: int, payload: ParkingLotUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
     lot = db.get(ParkingLot, lot_id)
     if not lot:
         raise HTTPException(404, "Parqueadero no encontrado")
+    resolve_parking_lot(db, lot_id)
     data = payload.model_dump(exclude_unset=True)
     if "name" in data and data["name"] is not None:
         lot.name = data["name"].strip()
@@ -285,15 +303,17 @@ def update_parking_lot(lot_id: int, payload: ParkingLotUpdate, db: Session = Dep
         lot.address = data["address"].strip()
     if "active" in data and data["active"] is not None:
         lot.active = data["active"]
+    audit_admin(db, "PARKING_LOT_UPDATED", lot.name)
     db.commit()
     db.refresh(lot)
     return parking_lot_summary(db, lot)
 
 
-@app.get("/api/bootstrap")
+@app.get("/api/bootstrap", dependencies=[Depends(permit("VIEW_AVAILABILITY"))])
 def bootstrap(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
+    allowed_lot_id = resolve_parking_lot(db, parking_lot_id)
     lots = db.scalars(select(ParkingLot).where(ParkingLot.active.is_(True)).order_by(ParkingLot.id)).all()
-    lot = next((item for item in lots if item.id == parking_lot_id), None) if parking_lot_id else (lots[0] if lots else None)
+    lot = next((item for item in lots if item.id == allowed_lot_id), None)
     if not lot:
         raise HTTPException(404, "No hay parqueaderos activos configurados")
     sites = db.scalars(select(Site).where(Site.parking_lot_id == lot.id, Site.active.is_(True))).all()
@@ -306,9 +326,9 @@ def bootstrap(parking_lot_id: int | None = None, db: Session = Depends(get_db)) 
     }
 
 
-@app.patch("/api/parking-lot")
+@app.patch("/api/parking-lot", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def update_parking_lot(payload: ParkingLotUpdate, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     lot = db.get(ParkingLot, lot_id) if lot_id else None
     if not lot:
         raise HTTPException(404, "Parqueadero no encontrado")
@@ -318,14 +338,14 @@ def update_parking_lot(payload: ParkingLotUpdate, parking_lot_id: int | None = N
     return {"id": lot.id, "name": lot.name, "tax_id": lot.tax_id}
 
 
-@app.get("/api/vehicle-types")
+@app.get("/api/vehicle-types", dependencies=[Depends(permit("OPERATE"))])
 def list_vehicle_types(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return [{"id": item.id, "code": item.code, "name": item.name} for item in db.scalars(select(VehicleType).order_by(VehicleType.id)).all()]
 
 
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", dependencies=[Depends(permit("OPERATE"))])
 def dashboard(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     if not lot_id:
         raise HTTPException(404, "Parqueadero no encontrado")
     cells = db.scalars(select(Cell).join(Zone).join(Site).where(Site.parking_lot_id == lot_id, Cell.operational_status == "ACTIVE")).all()
@@ -404,9 +424,9 @@ def dashboard(parking_lot_id: int | None = None, db: Session = Depends(get_db)) 
     }
 
 
-@app.get("/api/customers")
+@app.get("/api/customers", dependencies=[Depends(permit("OPERATE"))])
 def list_customers(parking_lot_id: int | None = None, search: str = "", db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     stmt = select(Customer).where(Customer.parking_lot_id == lot_id, Customer.active.is_(True)).options(joinedload(Customer.vehicles))
     if search:
         needle = f"%{search.strip()}%"
@@ -416,9 +436,11 @@ def list_customers(parking_lot_id: int | None = None, search: str = "", db: Sess
              "vehicles_count": len(customer.vehicles)} for customer in db.scalars(stmt.order_by(Customer.full_name)).unique().all()]
 
 
-@app.post("/api/customers", status_code=201)
+@app.post("/api/customers", status_code=201, dependencies=[Depends(permit("OPERATE"))])
 def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    lot_id = resolve_parking_lot(db, payload.parking_lot_id)
     customer_data = payload.model_dump()
+    customer_data["parking_lot_id"] = lot_id
     customer_data["document_number"] = payload.document_number.strip()
     customer = Customer(**customer_data)
     db.add(customer)
@@ -432,7 +454,7 @@ def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)) -> d
             "phone": customer.phone, "email": customer.email, "vehicles_count": 0}
 
 
-@app.put("/api/customers/{customer_id}")
+@app.put("/api/customers/{customer_id}", dependencies=[Depends(permit("OPERATE"))])
 def update_customer(customer_id: int, payload: CustomerCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Actualiza los datos de un cliente del parqueadero; los vehículos no cambian."""
     customer = db.scalar(select(Customer).where(Customer.id == customer_id, Customer.parking_lot_id == payload.parking_lot_id))
@@ -487,9 +509,9 @@ def vehicle_payload(db: Session, vehicle: Vehicle) -> dict[str, Any]:
     }
 
 
-@app.get("/api/vehicles")
+@app.get("/api/vehicles", dependencies=[Depends(permit("OPERATE"))])
 def list_vehicles(parking_lot_id: int | None = None, search: str = "", inside: bool | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     stmt = select(Vehicle).where(Vehicle.parking_lot_id == lot_id, Vehicle.active.is_(True)).options(joinedload(Vehicle.customer), joinedload(Vehicle.vehicle_type))
     if search:
         stmt = stmt.where(Vehicle.plate.ilike(f"%{search.strip()}%"))
@@ -498,15 +520,17 @@ def list_vehicles(parking_lot_id: int | None = None, search: str = "", inside: b
     return [item for item in result if inside is None or item["inside"] is inside]
 
 
-@app.post("/api/vehicles", status_code=201)
+@app.post("/api/vehicles", status_code=201, dependencies=[Depends(permit("OPERATE"))])
 def create_vehicle(payload: VehicleCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    lot_id = resolve_parking_lot(db, payload.parking_lot_id)
     customer = db.get(Customer, payload.customer_id)
-    if not customer or customer.parking_lot_id != payload.parking_lot_id:
+    if not customer or customer.parking_lot_id != lot_id:
         raise HTTPException(422, "El cliente no pertenece a este parqueadero")
     vehicle_type = db.get(VehicleType, payload.vehicle_type_id)
     if not vehicle_type:
         raise HTTPException(422, "Tipo de vehículo no válido")
     vehicle_data = payload.model_dump()
+    vehicle_data["parking_lot_id"] = lot_id
     vehicle_data["plate"] = payload.plate.strip().upper()
     vehicle = Vehicle(**vehicle_data)
     db.add(vehicle)
@@ -519,7 +543,7 @@ def create_vehicle(payload: VehicleCreate, db: Session = Depends(get_db)) -> dic
     return vehicle_payload(db, vehicle)
 
 
-@app.get("/api/contracts")
+@app.get("/api/contracts", dependencies=[Depends(permit("OPERATE"))])
 def list_contracts(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     """Cobertura contractual por vehículo para la pantalla de mensualidades.
 
@@ -527,7 +551,7 @@ def list_contracts(parking_lot_id: int | None = None, db: Session = Depends(get_
     y el último cobro registrado. Las fechas se toman de los datos reales: la
     cobertura une todos los periodos pagados del vehículo.
     """
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     today = date.today()
     vehicles = db.scalars(
         select(Vehicle)
@@ -595,41 +619,46 @@ def list_contracts(parking_lot_id: int | None = None, db: Session = Depends(get_
     return rows
 
 
-@app.get("/api/sites")
+@app.get("/api/sites", dependencies=[Depends(permit("OPERATE"))])
 def list_sites(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     return [{"id": site.id, "name": site.name, "address": site.address} for site in db.scalars(select(Site).where(Site.parking_lot_id == lot_id, Site.active.is_(True))).all()]
 
 
-@app.post("/api/sites", status_code=201)
+@app.post("/api/sites", status_code=201, dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def create_site(payload: SiteCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    resolve_parking_lot(db, payload.parking_lot_id)
     if not db.get(ParkingLot, payload.parking_lot_id):
         raise HTTPException(404, "Parqueadero no encontrado")
     site = Site(**payload.model_dump())
     db.add(site)
+    db.flush()
+    audit_admin(db, "SITE_CREATED", site.name)
     db.commit()
     db.refresh(site)
     return {"id": site.id, "name": site.name, "address": site.address}
 
 
-@app.get("/api/zones")
+@app.get("/api/zones", dependencies=[Depends(permit("OPERATE"))])
 def list_zones(site_id: int | None = None, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    stmt = select(Zone).join(Site)
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    stmt = select(Zone).join(Site).where(Site.parking_lot_id == lot_id)
     if site_id:
         stmt = stmt.where(Zone.site_id == site_id)
-    if parking_lot_id:
-        stmt = stmt.where(Site.parking_lot_id == parking_lot_id)
     return [{"id": zone.id, "site_id": zone.site_id, "name": zone.name, "code": zone.code}
             for zone in db.scalars(stmt.order_by(Zone.name)).all()]
 
 
-@app.post("/api/zones", status_code=201)
+@app.post("/api/zones", status_code=201, dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def create_zone(payload: ZoneCreate, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     site = db.get(Site, payload.site_id)
-    if not site or (parking_lot_id and site.parking_lot_id != parking_lot_id):
+    if not site or site.parking_lot_id != lot_id:
         raise HTTPException(404, "Sede no encontrada en este parqueadero")
     zone = Zone(site_id=payload.site_id, name=payload.name.strip(), code=(payload.code or "").strip().upper())
     db.add(zone)
+    db.flush()
+    audit_admin(db, "ZONE_CREATED", zone.name)
     db.commit()
     db.refresh(zone)
     return {"id": zone.id, "site_id": zone.site_id, "name": zone.name, "code": zone.code}
@@ -651,21 +680,21 @@ def cell_payload(db: Session, cell: Cell) -> dict[str, Any]:
     }
 
 
-@app.get("/api/cells")
+@app.get("/api/cells", dependencies=[Depends(permit("VIEW_AVAILABILITY"))])
 def list_cells(parking_lot_id: int | None = None, site_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    stmt = select(Cell).join(Zone).join(Site).options(joinedload(Cell.compatible_types))
-    if parking_lot_id:
-        stmt = stmt.where(Site.parking_lot_id == parking_lot_id)
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    stmt = select(Cell).join(Zone).join(Site).options(joinedload(Cell.compatible_types)).where(Site.parking_lot_id == lot_id)
     if site_id:
         stmt = stmt.where(Site.id == site_id)
     return [cell_payload(db, cell) for cell in db.scalars(stmt.order_by(Cell.code)).unique().all()]
 
 
-@app.post("/api/cells", status_code=201)
+@app.post("/api/cells", status_code=201, dependencies=[Depends(permit("MANAGE_CELLS"))])
 def create_cell(payload: CellCreate, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     zone = db.get(Zone, payload.zone_id)
     site = db.get(Site, zone.site_id) if zone else None
-    if not zone or not site or (parking_lot_id and site.parking_lot_id != parking_lot_id):
+    if not zone or not site or site.parking_lot_id != lot_id:
         raise HTTPException(404, "Zona no encontrada en este parqueadero")
     types = [db.get(VehicleType, type_id) for type_id in payload.compatible_type_ids]
     if any(item is None for item in types):
@@ -674,6 +703,8 @@ def create_cell(payload: CellCreate, parking_lot_id: int | None = None, db: Sess
                 compatible_types=[item for item in types if item is not None])
     db.add(cell)
     try:
+        db.flush()
+        audit_admin(db, "CELL_CREATED", cell.code)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -682,7 +713,7 @@ def create_cell(payload: CellCreate, parking_lot_id: int | None = None, db: Sess
     return cell_payload(db, cell)
 
 
-@app.patch("/api/cells/{cell_id}")
+@app.patch("/api/cells/{cell_id}", dependencies=[Depends(permit("MANAGE_CELLS"))])
 def update_cell(cell_id: int, payload: CellUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Edita código, zona, compatibilidad u observación de una celda libre."""
     cell = db.get(Cell, cell_id)
@@ -713,6 +744,7 @@ def update_cell(cell_id: int, payload: CellUpdate, db: Session = Depends(get_db)
     cell.compatible_types = [item for item in types if item is not None]
     if payload.description is not None:
         cell.description = payload.description.strip()[:200]
+    audit_admin(db, "CELL_UPDATED", cell.code)
     try:
         db.commit()
     except IntegrityError:
@@ -722,11 +754,10 @@ def update_cell(cell_id: int, payload: CellUpdate, db: Session = Depends(get_db)
     return cell_payload(db, cell)
 
 
-@app.patch("/api/cells/{cell_id}/status")
+@app.patch("/api/cells/{cell_id}/status", dependencies=[Depends(permit("MANAGE_CELLS"))])
 def update_cell_status(
     cell_id: int,
     payload: CellStatusUpdate,
-    x_actor_username: str | None = Header(default=None, alias=ACTOR_HEADER),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     if payload.operational_status not in {"ACTIVE", "MAINTENANCE", "INACTIVE"}:
@@ -746,14 +777,15 @@ def update_cell_status(
             from_status=previous,
             to_status=payload.operational_status,
             reason=payload.reason.strip()[:240],
-            actor=(x_actor_username or "").strip()[:60],
+            actor=acting_name(db, 0, None),
         )
     )
+    audit_admin(db, "CELL_STATUS_CHANGED", f"{cell.code} -> {payload.operational_status}")
     db.commit()
     return cell_payload(db, cell)
 
 
-@app.get("/api/cells/{cell_id}/status-events")
+@app.get("/api/cells/{cell_id}/status-events", dependencies=[Depends(permit("VIEW_AVAILABILITY"))])
 def list_cell_status_events(
     cell_id: int,
     limit: int = Query(default=10, ge=1, le=50),
@@ -782,10 +814,10 @@ def list_cell_status_events(
     ]
 
 
-@app.get("/api/tariffs")
+@app.get("/api/tariffs", dependencies=[Depends(permit("OPERATE"))])
 def list_tariffs(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     """Tarifa vigente de cada tipo de vehículo (la más reciente por tipo)."""
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     rows = db.execute(select(MonthlyTariff, VehicleType).join(VehicleType).where(MonthlyTariff.parking_lot_id == lot_id).order_by(VehicleType.id, MonthlyTariff.effective_from.desc())).all()
     latest_by_type: dict[int, dict[str, Any]] = {}
     for tariff, vehicle_type in rows:
@@ -794,9 +826,9 @@ def list_tariffs(parking_lot_id: int | None = None, db: Session = Depends(get_db
     return list(latest_by_type.values())
 
 
-@app.put("/api/tariffs/{vehicle_type_id}")
+@app.put("/api/tariffs/{vehicle_type_id}", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def update_tariff(vehicle_type_id: int, amount: Decimal = Query(gt=0), parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     today = date.today()
     tariff = db.scalar(select(MonthlyTariff).where(MonthlyTariff.parking_lot_id == lot_id, MonthlyTariff.vehicle_type_id == vehicle_type_id,
                                                         MonthlyTariff.effective_until.is_(None)).order_by(MonthlyTariff.effective_from.desc()).limit(1))
@@ -812,10 +844,10 @@ def update_tariff(vehicle_type_id: int, amount: Decimal = Query(gt=0), parking_l
     return {"vehicle_type_id": vehicle_type_id, "amount": money_float(tariff.amount), "effective_from": tariff.effective_from.isoformat()}
 
 
-@app.post("/api/tariffs", status_code=201)
+@app.post("/api/tariffs", status_code=201, dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def create_tariff(payload: TariffCreate, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Crea una vigencia nueva y cierra la anterior para evitar periodos superpuestos."""
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     if not lot_id:
         raise HTTPException(404, "Parqueadero no encontrado")
     if not db.get(VehicleType, payload.vehicle_type_id):
@@ -858,9 +890,9 @@ def create_tariff(payload: TariffCreate, parking_lot_id: int | None = None, db: 
     return tariff_payload(db, tariff)
 
 
-@app.get("/api/tariffs/history")
+@app.get("/api/tariffs/history", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def list_tariff_history(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     rows = db.execute(
         select(MonthlyTariff, VehicleType)
         .join(VehicleType, MonthlyTariff.vehicle_type_id == VehicleType.id)
@@ -870,7 +902,7 @@ def list_tariff_history(parking_lot_id: int | None = None, db: Session = Depends
     return [tariff_payload(db, tariff, vehicle_type) for tariff, vehicle_type in rows]
 
 
-@app.get("/api/reports")
+@app.get("/api/reports", dependencies=[Depends(permit("VIEW_HISTORY"))])
 def build_report(
     parking_lot_id: int | None = None,
     report_date: date | None = None,
@@ -882,7 +914,7 @@ def build_report(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Reporte operativo del día: indicadores, inventario, cobertura y flujo."""
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     if not lot_id:
         raise HTTPException(404, "Parqueadero no encontrado")
     lot = db.get(ParkingLot, lot_id)
@@ -1009,6 +1041,8 @@ def build_report(
         "exited_at": item.exited_at.isoformat() if item.exited_at else None,
         "cell_code": item.cell.code,
         "zone_name": db.get(Zone, item.cell.zone_id).name if item.cell.zone_id else "",
+        "entry_employee_id": item.entry_employee_id,
+        "exit_employee_id": item.exit_employee_id,
         "entry_employee": employee_names.get(item.entry_employee_id),
         "exit_employee": employee_names.get(item.exit_employee_id),
         "state": "CERRADO" if item.exited_at else "ACTIVO",
@@ -1053,9 +1087,9 @@ def build_report(
     }
 
 
-@app.get("/api/employees")
+@app.get("/api/employees", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def list_employees(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     employees = db.scalars(
         select(Employee).where(Employee.parking_lot_id == lot_id)
         .options(joinedload(Employee.shift)).order_by(Employee.active.desc(), Employee.full_name)
@@ -1063,8 +1097,9 @@ def list_employees(parking_lot_id: int | None = None, db: Session = Depends(get_
     return [employee_payload(employee) for employee in employees]
 
 
-@app.post("/api/employees", status_code=201)
+@app.post("/api/employees", status_code=201, dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def create_employee(payload: EmployeeCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    resolve_parking_lot(db, payload.parking_lot_id)
     if not db.get(ParkingLot, payload.parking_lot_id):
         raise HTTPException(404, "Parqueadero no encontrado")
     if payload.shift_id and not db.get(Shift, payload.shift_id):
@@ -1074,11 +1109,13 @@ def create_employee(payload: EmployeeCreate, db: Session = Depends(get_db)) -> d
         document_number=payload.document_number.strip(),
         full_name=payload.full_name.strip(),
         username=payload.username.strip(),
-        role=payload.role.strip().upper() or "OPERATOR",
+        role=normalize_role_code(payload.role),
         shift_id=payload.shift_id,
     )
     db.add(employee)
     try:
+        db.flush()
+        audit_admin(db, "EMPLOYEE_CREATED", employee.full_name)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -1087,24 +1124,26 @@ def create_employee(payload: EmployeeCreate, db: Session = Depends(get_db)) -> d
     return employee_payload(employee)
 
 
-@app.patch("/api/employees/{employee_id}")
+@app.patch("/api/employees/{employee_id}", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def update_employee(employee_id: int, payload: EmployeeUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    lot_id = resolve_parking_lot(db, None)
     employee = db.get(Employee, employee_id)
-    if not employee:
-        raise HTTPException(404, "Empleado no encontrado")
+    if not employee or employee.parking_lot_id != lot_id:
+        raise HTTPException(403, "El empleado no pertenece al parqueadero de la sesión.")
     data = payload.model_dump(exclude_unset=True)
     if data.get("full_name") is not None:
         employee.full_name = data["full_name"].strip()
     if data.get("username") is not None:
         employee.username = data["username"].strip()
     if data.get("role") is not None:
-        employee.role = data["role"].strip().upper()
+        employee.role = normalize_role_code(data["role"])
     if "shift_id" in data:
         if data["shift_id"] and not db.get(Shift, data["shift_id"]):
             raise HTTPException(422, "El turno indicado no existe")
         employee.shift_id = data["shift_id"]
     if data.get("active") is not None:
         employee.active = data["active"]
+    audit_admin(db, "EMPLOYEE_UPDATED", employee.full_name)
     try:
         db.commit()
     except IntegrityError:
@@ -1114,9 +1153,9 @@ def update_employee(employee_id: int, payload: EmployeeUpdate, db: Session = Dep
     return employee_payload(employee)
 
 
-@app.get("/api/shifts")
+@app.get("/api/shifts", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def list_shifts(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     shifts = db.scalars(
         select(Shift).where(Shift.parking_lot_id == lot_id)
         .options(joinedload(Shift.employees)).order_by(Shift.starts_at, Shift.name)
@@ -1124,7 +1163,7 @@ def list_shifts(parking_lot_id: int | None = None, db: Session = Depends(get_db)
     return [shift_payload(shift) for shift in shifts]
 
 
-@app.post("/api/shifts", status_code=201)
+@app.post("/api/shifts", status_code=201, dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def create_shift(payload: ShiftCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     if not db.get(ParkingLot, payload.parking_lot_id):
         raise HTTPException(404, "Parqueadero no encontrado")
@@ -1141,7 +1180,7 @@ def create_shift(payload: ShiftCreate, db: Session = Depends(get_db)) -> dict[st
     return shift_payload(shift)
 
 
-@app.patch("/api/shifts/{shift_id}")
+@app.patch("/api/shifts/{shift_id}", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
 def update_shift(shift_id: int, payload: ShiftUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
     shift = db.get(Shift, shift_id)
     if not shift:
@@ -1162,11 +1201,11 @@ def update_shift(shift_id: int, payload: ShiftUpdate, db: Session = Depends(get_
     return shift_payload(shift)
 
 
-@app.get("/api/activity")
+@app.get("/api/activity", dependencies=[Depends(permit("OPERATE"))])
 def list_activity(parking_lot_id: int | None = None, limit: int = Query(default=10, ge=1, le=100),
                   db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     """Actividad reciente: ingresos, salidas y pagos con su responsable."""
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     entries = db.execute(
         select(Movement, Employee, Vehicle, Cell)
         .join(Vehicle, Movement.vehicle_id == Vehicle.id)
@@ -1216,8 +1255,9 @@ def list_activity(parking_lot_id: int | None = None, limit: int = Query(default=
     return activity[:limit]
 
 
-@app.post("/api/movements/entry", status_code=201)
+@app.post("/api/movements/entry", status_code=201, dependencies=[Depends(permit("OPERATE"))])
 def register_entry(payload: EntryCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    actor = session_actor()
     vehicle = db.scalar(select(Vehicle).where(Vehicle.id == payload.vehicle_id).options(joinedload(Vehicle.vehicle_type)))
     cell = db.scalar(select(Cell).where(Cell.id == payload.cell_id).options(joinedload(Cell.compatible_types)))
     if not vehicle or not vehicle.active:
@@ -1242,8 +1282,22 @@ def register_entry(payload: EntryCreate, db: Session = Depends(get_db)) -> dict[
     cell_used = db.scalar(select(Movement.id).where(Movement.cell_id == cell.id, Movement.exited_at.is_(None)))
     if cell_used:
         raise HTTPException(409, "La celda ya está ocupada")
-    movement = Movement(vehicle_id=vehicle.id, cell_id=cell.id, notes=payload.notes)
+    movement = Movement(
+        vehicle_id=vehicle.id,
+        cell_id=cell.id,
+        notes=payload.notes,
+        entry_employee_id=actor.employee_id,
+    )
     db.add(movement)
+    record_activity(
+        db,
+        lot_id=actor.parking_lot_id,
+        action="MOVEMENT_ENTRY",
+        detail=f"{vehicle.plate} · {cell.code}",
+        actor=actor.display_name,
+        user_id=actor.user_id,
+        employee_id=actor.employee_id,
+    )
     try:
         db.commit()
     except IntegrityError:
@@ -1251,12 +1305,14 @@ def register_entry(payload: EntryCreate, db: Session = Depends(get_db)) -> dict[
         raise HTTPException(409, "La celda o el vehículo acaba de ser asignado por otro empleado")
     db.refresh(movement)
     return {"id": movement.id, "vehicle_id": vehicle.id, "plate": vehicle.plate, "cell_id": cell.id,
-            "cell_code": cell.code, "entered_at": movement.entered_at.isoformat(), "exited_at": None}
+            "cell_code": cell.code, "entered_at": movement.entered_at.isoformat(), "exited_at": None,
+            "entry_employee_id": actor.employee_id, "entry_employee": actor.display_name}
 
 
-@app.post("/api/movements/{movement_id}/exit")
+@app.post("/api/movements/{movement_id}/exit", dependencies=[Depends(permit("OPERATE"))])
 def register_exit(movement_id: int, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    actor = session_actor()
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     movement = db.scalar(select(Movement).join(Vehicle).where(
         Movement.id == movement_id,
         Movement.exited_at.is_(None),
@@ -1266,16 +1322,26 @@ def register_exit(movement_id: int, parking_lot_id: int | None = None, db: Sessi
         raise HTTPException(404, "No se encontró un ingreso activo con ese identificador")
     exited_at = datetime.now()
     movement.exited_at = exited_at
+    movement.exit_employee_id = actor.employee_id
+    record_activity(
+        db,
+        lot_id=actor.parking_lot_id,
+        action="MOVEMENT_EXIT",
+        detail=f"{movement.vehicle.plate} · {movement.cell.code}",
+        actor=actor.display_name,
+        user_id=actor.user_id,
+        employee_id=actor.employee_id,
+    )
     db.commit()
     return {"id": movement.id, "plate": movement.vehicle.plate, "cell_code": movement.cell.code,
-            "exited_at": exited_at.isoformat()}
+            "exited_at": exited_at.isoformat(),
+            "exit_employee_id": actor.employee_id, "exit_employee": actor.display_name}
 
 
-@app.get("/api/movements")
+@app.get("/api/movements", dependencies=[Depends(permit("OPERATE"))])
 def list_movements(active: bool = False, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    stmt = select(Movement).join(Vehicle).join(Cell).join(Zone).join(Site).options(joinedload(Movement.vehicle).joinedload(Vehicle.customer), joinedload(Movement.vehicle).joinedload(Vehicle.vehicle_type), joinedload(Movement.cell))
-    if parking_lot_id:
-        stmt = stmt.where(Vehicle.parking_lot_id == parking_lot_id)
+    lot_id = resolve_parking_lot(db, parking_lot_id)
+    stmt = select(Movement).join(Vehicle).join(Cell).join(Zone).join(Site).options(joinedload(Movement.vehicle).joinedload(Vehicle.customer), joinedload(Movement.vehicle).joinedload(Vehicle.vehicle_type), joinedload(Movement.cell)).where(Vehicle.parking_lot_id == lot_id)
     if active:
         stmt = stmt.where(Movement.exited_at.is_(None))
     movements = db.scalars(stmt.order_by(Movement.entered_at.desc()).limit(100)).unique().all()
@@ -1284,13 +1350,16 @@ def list_movements(active: bool = False, parking_lot_id: int | None = None, db: 
              "brand": item.vehicle.brand, "color": item.vehicle.color, "type_name": item.vehicle.vehicle_type.name,
              "customer_name": item.vehicle.customer.full_name, "cell_id": item.cell_id, "cell_code": item.cell.code,
              "entered_at": item.entered_at.isoformat(), "exited_at": item.exited_at.isoformat() if item.exited_at else None,
+             "entry_employee_id": item.entry_employee_id,
+             "exit_employee_id": item.exit_employee_id,
              "entry_employee": employee_names.get(item.entry_employee_id),
              "exit_employee": employee_names.get(item.exit_employee_id)}
             for item in movements]
 
 
-@app.post("/api/payments", status_code=201)
+@app.post("/api/payments", status_code=201, dependencies=[Depends(permit("OPERATE"))])
 def register_payment(payload: PaymentCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    actor = session_actor()
     vehicle = db.scalar(select(Vehicle).where(Vehicle.id == payload.vehicle_id).options(joinedload(Vehicle.vehicle_type)))
     if not vehicle:
         raise HTTPException(404, "Vehículo no encontrado")
@@ -1311,18 +1380,20 @@ def register_payment(payload: PaymentCreate, db: Session = Depends(get_db)) -> d
     db.flush()
     payment = Payment(contract_id=contract.id, amount=tariff.amount * payload.months,
                       paid_at=payload.paid_at or datetime.now(), period_start=period_start,
-                      period_end=period_end, method=payload.method, notes=payload.notes)
+                      period_end=period_end, method=payload.method, notes=payload.notes,
+                      employee_id=actor.employee_id)
     db.add(payment)
+    record_activity(db, lot_id=actor.parking_lot_id, action="PAYMENT_RECORDED", detail=f"{vehicle.plate} · {payload.months} mes(es)", actor=actor.display_name, user_id=actor.user_id, employee_id=actor.employee_id)
     db.commit()
     db.refresh(payment)
     return {"id": payment.id, "vehicle_id": vehicle.id, "plate": vehicle.plate, "amount": money_float(payment.amount),
             "paid_at": payment.paid_at.isoformat(), "period_start": period_start.isoformat(), "period_end": period_end.isoformat(),
-            "method": payment.method}
+            "method": payment.method, "employee_id": actor.employee_id, "employee": actor.display_name}
 
 
-@app.get("/api/payments")
+@app.get("/api/payments", dependencies=[Depends(permit("OPERATE"))])
 def list_payments(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     payments = db.scalars(select(Payment).join(MonthlyContract).join(Vehicle).where(Vehicle.parking_lot_id == lot_id)
                           .options(joinedload(Payment.contract).joinedload(MonthlyContract.vehicle)).order_by(Payment.paid_at.desc()).limit(100)).unique().all()
     return [{"id": item.id, "plate": item.contract.vehicle.plate, "amount": money_float(item.amount),
@@ -1330,9 +1401,9 @@ def list_payments(parking_lot_id: int | None = None, db: Session = Depends(get_d
              "period_end": item.period_end.isoformat(), "method": item.method} for item in payments]
 
 
-@app.get("/api/novelties")
+@app.get("/api/novelties", dependencies=[Depends(permit("OPERATE"))])
 def list_novelties(parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    lot_id = parking_lot_id or db.scalar(select(ParkingLot.id).order_by(ParkingLot.id).limit(1))
+    lot_id = resolve_parking_lot(db, parking_lot_id)
     rows = db.execute(select(Novelty, Vehicle, Employee).join(Vehicle, Novelty.vehicle_id == Vehicle.id)
                       .outerjoin(Employee, Novelty.employee_id == Employee.id)
                       .where(Vehicle.parking_lot_id == lot_id).order_by(Novelty.created_at.desc()).limit(100)).all()
@@ -1343,7 +1414,7 @@ def list_novelties(parking_lot_id: int | None = None, db: Session = Depends(get_
             for novelty, vehicle, employee in rows]
 
 
-@app.post("/api/novelties", status_code=201)
+@app.post("/api/novelties", status_code=201, dependencies=[Depends(permit("OPERATE"))])
 def create_novelty(payload: NoveltyCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     if not db.get(Vehicle, payload.vehicle_id):
         raise HTTPException(404, "Vehículo no encontrado")
@@ -1366,38 +1437,24 @@ def create_novelty(payload: NoveltyCreate, db: Session = Depends(get_db)) -> dic
 #: `ACTOR_HEADER` se define junto a los imports (lo usan también los endpoints
 #: de celdas, que guardan el responsable en `cell_status_events`).
 
-#: Permisos por código de rol. Los mismos códigos son los que la matriz de la
-#: interfaz muestra y los que los endpoints de este módulo validan.
-ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
-    "ADMIN": ("OPERATE", "VIEW_AVAILABILITY", "MANAGE_ACCOUNTS", "MANAGE_STRUCTURE", "VIEW_ACTIVITY"),
-    "OPERATOR": ("OPERATE", "VIEW_AVAILABILITY"),
-}
-
-#: Filas de la matriz «Permisos por rol».
-PERMISSION_FUNCTIONS: tuple[tuple[str, str], ...] = (
-    ("OPERATE", "Registrar ingresos, salidas, pagos y novedades"),
-    ("VIEW_AVAILABILITY", "Consultar disponibilidad y celdas compatibles"),
-    ("MANAGE_ACCOUNTS", "Crear, editar, activar o desactivar cuentas"),
-    ("MANAGE_STRUCTURE", "Gestionar sedes, zonas y configuración de celdas"),
-    ("VIEW_ACTIVITY", "Consultar bitácora administrativa"),
-)
-
-#: Etiquetas de la bitácora administrativa.
-ACTIVITY_LABELS: dict[str, str] = {
-    "USER_CREATED": "Creación de cuenta",
-    "USER_UPDATED": "Edición de cuenta",
-    "ROLES_UPDATED": "Actualización de rol",
-    "USER_ACTIVATED": "Activación de cuenta",
-    "USER_DEACTIVATED": "Desactivación de cuenta",
-    "PASSWORD_CHANGED": "Actualización de contraseña",
-}
+#: ROLE_PERMISSIONS, PERMISSION_FUNCTIONS y ACTIVITY_LABELS se importan de
+#: `app.rbac` para no duplicar la matriz entre backend y frontend.
 
 USERNAME_PATTERN = re.compile(r"^[a-z0-9._]{4,30}$")
 MIN_PASSWORD_LENGTH = 12
 
 
 def resolve_parking_lot(db: Session, parking_lot_id: int | None) -> int:
-    """Aísla la operación por parqueadero: valida el indicado o usa el activo."""
+    """Aísla la operación por parqueadero de la cuenta autenticada.
+
+    La sesión determina el parqueadero: si se pide otro distinto, se rechaza
+    con 403. No se confía en el ``parking_lot_id`` enviado por el cliente.
+    """
+    principal = current_principal.get()
+    if principal is not None:
+        if parking_lot_id and int(parking_lot_id) != principal.parking_lot_id:
+            raise HTTPException(403, "La cuenta autenticada no pertenece a este parqueadero.")
+        return principal.parking_lot_id
     if parking_lot_id:
         if not db.get(ParkingLot, parking_lot_id):
             raise HTTPException(404, "Parqueadero no encontrado")
@@ -1406,6 +1463,14 @@ def resolve_parking_lot(db: Session, parking_lot_id: int | None) -> int:
     if not lot_id:
         raise HTTPException(404, "No hay parqueaderos registrados")
     return lot_id
+
+
+def session_actor() -> Principal:
+    """Responsable de la operación, tomado de la sesión firmada (nunca del cliente)."""
+    principal = current_principal.get()
+    if principal is None:
+        raise HTTPException(401, "Inicia sesión para continuar.")
+    return principal
 
 
 def role_ids_for_codes(db: Session, codes: tuple[str, ...]) -> list[int]:
@@ -1420,58 +1485,30 @@ def role_codes_of(db: Session, user_id: int) -> set[str]:
 
 
 def actor_permissions(db: Session, lot_id: int, actor: str | None) -> set[str]:
-    """Permisos efectivos de la cuenta enviada en la cabecera de actor."""
-    username = (actor or "").strip()
-    if not username:
-        return set()
-    user = db.scalar(
-        select(UserAccount).where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
-    )
-    if not user or not user.active:
-        return set()
-    permissions: set[str] = set()
-    for code in role_codes_of(db, user.id):
-        permissions.update(ROLE_PERMISSIONS.get(code, ()))
-    return permissions
+    """Compatibilidad: devuelve los permisos de la cuenta de la sesión actual."""
+    principal = current_principal.get()
+    return set(principal.permissions) if principal else set()
 
 
 def require_permission(db: Session, lot_id: int, actor: str | None, permission: str) -> None:
-    """Autoriza en FastAPI, no solo en la interfaz.
+    """Compatibilidad con endpoints antiguos: delega en la dependencia de sesión.
 
-    Reglas:
-    * Parqueadero sin cuentas: se permite el primer alta (no hay nada que proteger).
-    * Sin cabecera de actor cuando ya hay cuentas: 401.
-    * Actor sin la cuenta, inactiva o sin el permiso: 403.
+    La autorización real la ejecuta ``app.auth.permit`` antes de entrar al
+    endpoint; esta función solo evita que un endpoint olvidado quede abierto.
     """
-    total = db.scalar(select(func.count(UserAccount.id)).where(UserAccount.parking_lot_id == lot_id)) or 0
-    if total == 0:
-        return
-    username = (actor or "").strip()
-    if not username:
-        raise HTTPException(401, "Identifica al administrador con la cabecera X-Actor-Username")
-    user = db.scalar(
-        select(UserAccount).where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
-    )
-    if not user:
-        raise HTTPException(403, "La cuenta que actúa no pertenece a este parqueadero")
-    if not user.active:
-        raise HTTPException(403, f"La cuenta {username} está inactiva")
-    if permission not in actor_permissions(db, lot_id, username):
-        raise HTTPException(403, "Tu rol no tiene permiso para esta operación: está reservada al Administrador")
+    principal = current_principal.get()
+    if principal is None:
+        raise HTTPException(401, "Inicia sesión para continuar.")
+    if principal.parking_lot_id != lot_id:
+        raise HTTPException(403, "La cuenta autenticada no pertenece a este parqueadero.")
+    if permission not in principal.permissions:
+        raise HTTPException(403, "Tu rol no tiene permiso para esta operación.")
 
 
 def acting_name(db: Session, lot_id: int, actor: str | None) -> str:
-    """Nombre de quien realiza la operación para la bitácora (sin contraseñas)."""
-    username = (actor or "").strip()
-    if not username:
-        return "Alta inicial"
-    user = db.scalar(
-        select(UserAccount).where(UserAccount.parking_lot_id == lot_id, UserAccount.username == username)
-    )
-    if not user:
-        return username[:60]
-    employee = db.get(Employee, user.employee_id)
-    return (employee.full_name if employee else user.username)[:60]
+    """Nombre de quien realiza la operación, tomado de la sesión firmada."""
+    principal = current_principal.get()
+    return principal.display_name if principal else (actor or "Sistema")[:60]
 
 
 def validate_username(value: str | None) -> str:
@@ -1587,6 +1624,30 @@ def record_activity(
     )
 
 
+def normalize_role_code(code: str | None, default: str = ROLE_EMPLOYEE) -> str:
+    """Acepta códigos heredados pero persiste solo la nomenclatura canónica."""
+    value = (code or "").strip().upper()
+    if value == "ADMIN":
+        return ROLE_ADMIN
+    if value == "OPERATOR":
+        return ROLE_EMPLOYEE
+    return value or default
+
+
+def audit_admin(db: Session, action: str, detail: str = "") -> None:
+    """Registra una operación administrativa con el responsable de la sesión."""
+    principal = current_principal.get()
+    if principal is None:
+        return
+    record_activity(
+        db,
+        lot_id=principal.parking_lot_id,
+        action=action,
+        detail=detail,
+        actor=principal.display_name,
+    )
+
+
 def activity_payload(item: UserActivity, account: UserAccount | None) -> dict[str, Any]:
     label = ACTIVITY_LABELS.get(item.action, item.action)
     operation = f"{label} · {item.detail}" if item.detail else label
@@ -1601,14 +1662,14 @@ def activity_payload(item: UserActivity, account: UserAccount | None) -> dict[st
     }
 
 
-@app.get("/api/roles")
+@app.get("/api/roles", dependencies=[Depends(permit("MANAGE_ACCOUNTS"))])
 def list_roles(db: Session = Depends(get_db)) -> list[RoleOut]:
     """Catálogo de roles con los permisos que esta API aplica en sus endpoints."""
     roles = db.scalars(select(Role).order_by(Role.sort, Role.id)).all()
     return [role_payload(role) for role in roles]
 
 
-@app.get("/api/users/employees-available")
+@app.get("/api/users/employees-available", dependencies=[Depends(permit("MANAGE_ACCOUNTS"))])
 def list_available_employees(
     parking_lot_id: int | None = None,
     actor: str | None = Header(default=None, alias=ACTOR_HEADER),
@@ -1627,7 +1688,7 @@ def list_available_employees(
     return [employee_payload(employee) for employee in employees]
 
 
-@app.get("/api/users/activity")
+@app.get("/api/users/activity", dependencies=[Depends(permit("VIEW_ACTIVITY"))])
 def list_user_activity(
     parking_lot_id: int | None = None,
     limit: int = Query(default=50, ge=1, le=100),
@@ -1647,7 +1708,7 @@ def list_user_activity(
     return [activity_payload(item, account) for item, account in rows]
 
 
-@app.get("/api/users")
+@app.get("/api/users", dependencies=[Depends(permit("MANAGE_ACCOUNTS"))])
 def list_users(
     parking_lot_id: int | None = None,
     search: str = "",
@@ -1687,7 +1748,7 @@ def list_users(
     return [user_payload(row) for row in rows]
 
 
-@app.get("/api/users/{user_id}")
+@app.get("/api/users/{user_id}", dependencies=[Depends(permit("MANAGE_ACCOUNTS"))])
 def get_user(
     user_id: int,
     parking_lot_id: int | None = None,
@@ -1698,7 +1759,7 @@ def get_user(
     return fetch_user_payload(db, user_id, lot_id)
 
 
-@app.post("/api/users", status_code=201)
+@app.post("/api/users", status_code=201, dependencies=[Depends(permit("MANAGE_ACCOUNTS"))])
 def create_user(
     payload: UserCreate,
     actor: str | None = Header(default=None, alias=ACTOR_HEADER),
@@ -1736,6 +1797,7 @@ def create_user(
         username=username,
         password_hash=hash_password(password or ""),
         active=bool(payload.active),
+        must_change_password=True,
     )
     db.add(user)
     db.flush()
@@ -1758,7 +1820,7 @@ def create_user(
     return fetch_user_payload(db, user.id, lot_id)
 
 
-@app.patch("/api/users/{user_id}")
+@app.patch("/api/users/{user_id}", dependencies=[Depends(permit("MANAGE_ACCOUNTS"))])
 def update_user(
     user_id: int,
     payload: UserUpdate,
@@ -1806,6 +1868,7 @@ def update_user(
         password = validate_password(data.get("password"), required=False)
         if password:
             user.password_hash = hash_password(password)
+            user.must_change_password = True
             password_changed = True
 
     roles_changed = False
@@ -1868,7 +1931,7 @@ def update_user(
     return fetch_user_payload(db, user.id, lot_id)
 
 
-@app.patch("/api/users/{user_id}/status")
+@app.patch("/api/users/{user_id}/status", dependencies=[Depends(permit("MANAGE_ACCOUNTS"))])
 def set_user_status(
     user_id: int,
     payload: UserStatusUpdate,
@@ -1906,7 +1969,7 @@ def access_check(payload: UserAccessCheck, db: Session = Depends(get_db)) -> dic
     """Comprueba credenciales sin crear sesión ni registrar la contraseña.
 
     Estados que la interfaz representa: credenciales incorrectas y cuenta
-    inactiva. Este proyecto no implementa autenticación con sesión.
+    inactiva. No crea sesión: para entrar se usa `POST /api/auth/login`.
     """
     lot_id = resolve_parking_lot(db, payload.parking_lot_id)
     username = (payload.username or "").strip()
@@ -1929,5 +1992,5 @@ def access_check(payload: UserAccessCheck, db: Session = Depends(get_db)) -> dic
         "status": "OK",
         "username": user.username,
         "roles": role_names(db, role_ids),
-        "message": "Credenciales verificadas. Esta interfaz no inicia sesión.",
+        "message": "Credenciales verificadas. Usa el inicio de sesión para entrar.",
     }

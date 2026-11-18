@@ -250,6 +250,8 @@ class UserAccount(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: Contraseña temporal: obliga a cambiarla en el primer inicio de sesión.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     employee: Mapped["Employee"] = relationship()
     parking_lot: Mapped["ParkingLot"] = relationship()
 

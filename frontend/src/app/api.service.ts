@@ -127,8 +127,6 @@ export class ApiService {
   /** En desarrollo apunta a la API local; en producción a `/api` (nginx). */
   private readonly base = environment.apiUrl;
   private activeLotId = 1;
-  /** Cuenta administradora que realiza la operación (cabecera X-Actor-Username). */
-  private actor = '';
 
   setParkingLot(id: number): void { this.activeLotId = id; }
   private scopedParams(values: Record<string, string | number | boolean> = {}): HttpParams {
@@ -166,7 +164,7 @@ export class ApiService {
   }
   updateCellStatus(id: number, operational_status: string, reason = ''): Observable<Cell> {
     return this.http.patch<Cell>(`${this.base}/cells/${id}/status`, { operational_status, reason },
-      { params: this.scopedParams(), headers: this.actorHeaders() });
+      { params: this.scopedParams() });
   }
   cellStatusEvents(id: number, limit = 5): Observable<CellStatusEvent[]> {
     return this.http.get<CellStatusEvent[]>(`${this.base}/cells/${id}/status-events`, { params: this.scopedParams({ limit }) });
@@ -218,30 +216,24 @@ export class ApiService {
   /* ------------------------------------------------------------------ */
   /* Administración · Usuarios: cuentas de acceso, roles y bitácora      */
   /* ------------------------------------------------------------------ */
-  /** Cuenta que realiza la operación (no hay sesiones: la API la recibe en X-Actor-Username). */
-  setActor(username: string): void { this.actor = username; }
-  private actorHeaders(): Record<string, string> {
-    return this.actor ? { 'X-Actor-Username': this.actor } : {};
-  }
-
   roles(): Observable<Role[]> { return this.http.get<Role[]>(`${this.base}/roles`); }
   users(filters: { search?: string; role?: string; status?: string } = {}): Observable<UserRoleRow[]> {
     return this.http.get<UserRoleRow[]>(`${this.base}/users`, { params: this.scopedParams(filters) });
   }
   availableEmployees(): Observable<Employee[]> {
-    return this.http.get<Employee[]>(`${this.base}/users/employees-available`, { params: this.scopedParams(), headers: this.actorHeaders() });
+    return this.http.get<Employee[]>(`${this.base}/users/employees-available`, { params: this.scopedParams() });
   }
   usersActivity(limit = 50): Observable<UserActivityRow[]> {
-    return this.http.get<UserActivityRow[]>(`${this.base}/users/activity`, { params: this.scopedParams({ limit }), headers: this.actorHeaders() });
+    return this.http.get<UserActivityRow[]>(`${this.base}/users/activity`, { params: this.scopedParams({ limit }) });
   }
   createUser(payload: { parking_lot_id: number; employee_id: number; username: string; password: string; role_ids: number[] }): Observable<UserRoleRow> {
-    return this.http.post<UserRoleRow>(`${this.base}/users`, payload, { headers: this.actorHeaders() });
+    return this.http.post<UserRoleRow>(`${this.base}/users`, payload);
   }
   updateUser(id: number, payload: { username?: string; password?: string; role_ids?: number[] }): Observable<UserRoleRow> {
-    return this.http.patch<UserRoleRow>(`${this.base}/users/${id}`, payload, { params: this.scopedParams(), headers: this.actorHeaders() });
+    return this.http.patch<UserRoleRow>(`${this.base}/users/${id}`, payload, { params: this.scopedParams() });
   }
   setUserStatus(id: number, active: boolean): Observable<UserRoleRow> {
-    return this.http.patch<UserRoleRow>(`${this.base}/users/${id}/status`, { active }, { params: this.scopedParams(), headers: this.actorHeaders() });
+    return this.http.patch<UserRoleRow>(`${this.base}/users/${id}/status`, { active }, { params: this.scopedParams() });
   }
   /** Comprueba credenciales sin crear sesión. */
   accessCheck(payload: { parking_lot_id: number; username: string; password: string }): Observable<AccessCheckResult> {

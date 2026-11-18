@@ -2,8 +2,9 @@
 
 
 def test_new_parking_lot_starts_without_team_or_shifts(client):
-    """La demostración no siembra personal: el equipo y los turnos nacen vacíos."""
-    assert client.get("/api/employees").json() == []
+    """La demo no siembra turnos; el único empleado es la cuenta de prueba."""
+    employees = client.get("/api/employees").json()
+    assert [item["full_name"] for item in employees] == ["Administrador de prueba"]
     assert client.get("/api/shifts").json() == []
 
 
@@ -20,7 +21,7 @@ def test_shift_and_employee_are_linked_to_the_parking_lot(client):
         "shift_id": shift_id,
     })
     assert employee.status_code == 201, employee.text
-    assert employee.json()["role"] == "OPERATOR"
+    assert employee.json()["role"] == "EMPLEADO"
     assert employee.json()["shift_id"] == shift_id
 
     shifts = client.get("/api/shifts").json()
@@ -112,7 +113,7 @@ def test_reports_and_activity_describe_the_current_state(client):
     assert activity, "el pago queda registrado en la actividad"
     assert activity[0]["kind"] == "PAYMENT"
     assert "TEST01" in activity[0]["operation"]
-    assert activity[0]["employee"] is None
+    assert activity[0]["employee"] == "Administrador de prueba"
 
     updated = client.get("/api/reports").json()
     assert updated["indicators"]["customers"] == 1

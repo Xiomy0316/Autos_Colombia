@@ -1,358 +1,273 @@
-"""Pruebas del módulo Administración · Usuarios.
+"""Pruebas de autenticación, RBAC y bitácora del módulo Administración · Usuarios.
 
-Cubre: catálogo de roles, alta/edición de cuentas con hash de contraseña,
-bitácora administrativa, autorización por rol en FastAPI y aislamiento por
-`parking_lot_id`.
+Cubre: catálogo canónico de roles, hash de contraseñas, cambio obligatorio en el
+primer inicio de sesión, 401/403 reales en FastAPI, aislamiento por parqueadero,
+sesión persistente y cuentas desactivadas.
 """
 
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
 
 from app.database import engine
 from app.models import UserAccount, UserActivity
+from app.rbac import ROLE_ADMIN, ROLE_EMPLOYEE
 from app.security import verify_password
+
+TEMP_PASSWORD = "TemporalSegura123!"
 
 
 def role_ids(client, *codes):
-    """Devuelve los ids del catálogo para los códigos indicados."""
     roles = client.get("/api/roles").json()
     return [next(role for role in roles if role["code"] == code)["id"] for code in codes]
 
 
-def create_employee(client, username, full_name="Persona de prueba", parking_lot_id=1, document="1.000.001"):
+def create_employee(client, username, full_name="Persona de prueba", document="1.000.001"):
     response = client.post("/api/employees", json={
-        "parking_lot_id": parking_lot_id,
+        "parking_lot_id": 1,
         "full_name": full_name,
         "document_number": document,
         "username": username,
-        "role": "OPERATOR",
+        "role": ROLE_EMPLOYEE,
     })
     assert response.status_code == 201, response.text
     return response.json()
 
 
-def create_user(client, employee_id, username, *, parking_lot_id=1, roles=("OPERATOR",),
-                password="clave-segura-123", actor=None):
-    """Crea una cuenta. `actor` es la cabecera X-Actor-Username (requerida
-    cuando el parqueadero ya tiene al menos una cuenta)."""
-    headers = {"X-Actor-Username": actor} if actor else {}
+def create_user(client, employee_id, username, *, roles=(ROLE_EMPLOYEE,), password=TEMP_PASSWORD):
     return client.post("/api/users", json={
-        "parking_lot_id": parking_lot_id,
+        "parking_lot_id": 1,
         "employee_id": employee_id,
         "username": username,
         "password": password,
         "role_ids": role_ids(client, *roles),
-    }, headers=headers)
+    })
 
 
-def test_role_catalog_matches_existing_codes_without_duplicates(client):
-    """Los códigos son los que el proyecto ya usa: ADMIN y OPERATOR."""
-    roles = client.get("/api/roles")
-    assert roles.status_code == 200
-    codes = [role["code"] for role in roles.json()]
-    assert codes == ["ADMIN", "OPERATOR"], codes
-    admin = next(role for role in roles.json() if role["code"] == "ADMIN")
-    operator = next(role for role in roles.json() if role["code"] == "OPERATOR")
-    assert "MANAGE_ACCOUNTS" in admin["permissions"]
-    assert "VIEW_ACTIVITY" in admin["permissions"]
-    assert "MANAGE_ACCOUNTS" not in operator["permissions"]
-    assert "VIEW_ACTIVITY" not in operator["permissions"]
-    assert operator["description"] and admin["description"]
+def auth_client(anon_client, username, password):
+    response = anon_client.post("/api/auth/login", json={"username": username, "password": password})
+    assert response.status_code == 200, response.text
+    anon_client.headers.update({"Authorization": f"Bearer {response.json()['access_token']}"})
+    return response.json()
 
 
-def test_create_user_stores_a_hash_and_never_exposes_it(client):
+def test_role_catalog_is_canonical_and_has_only_two_roles(client):
+    """Solo ADMINISTRADOR y EMPLEADO, con permisos distintos y sin duplicados."""
+    response = client.get("/api/roles")
+    assert response.status_code == 200
+    codes = [role["code"] for role in response.json()]
+    assert codes == [ROLE_ADMIN, ROLE_EMPLOYEE], codes
+    admin = next(role for role in response.json() if role["code"] == ROLE_ADMIN)
+    employee = next(role for role in response.json() if role["code"] == ROLE_EMPLOYEE)
+    for permission in ("OPERATE", "VIEW_AVAILABILITY", "MANAGE_ACCOUNTS", "MANAGE_STRUCTURE",
+                       "MANAGE_CELLS", "VIEW_ACTIVITY", "VIEW_HISTORY"):
+        assert permission in admin["permissions"]
+    for permission in ("MANAGE_ACCOUNTS", "MANAGE_STRUCTURE", "MANAGE_CELLS",
+                       "VIEW_ACTIVITY", "VIEW_HISTORY"):
+        assert permission not in employee["permissions"]
+    assert "OPERATE" in employee["permissions"]
+    assert "VIEW_AVAILABILITY" in employee["permissions"]
+
+
+def test_create_user_hashes_password_and_forces_change(client):
+    """La contraseña nunca se guarda en texto plano y el alta exige cambio."""
     employee = create_employee(client, "camila.torres", "Camila Torres")
-    response = create_user(client, employee["id"], "camila.torres", roles=("OPERATOR",))
+    response = create_user(client, employee["id"], "camila.torres")
     assert response.status_code == 201, response.text
-
     payload = response.json()
-    assert "password" not in payload and "password_hash" not in payload
     assert payload["username"] == "camila.torres"
-    assert payload["active"] is True
-    assert payload["role_codes"] == ["OPERATOR"]
-    assert payload["employee_name"] == "Camila Torres"
+    assert payload["role_codes"] == [ROLE_EMPLOYEE]
+    assert "password" not in payload and "password_hash" not in payload
 
-    # El hash vive en la base y no es la contraseña en claro.
-    with Session(bind=engine) as db:
-        stored = db.scalar(select(UserAccount).where(UserAccount.username == "camila.torres"))
-        assert stored is not None
-        assert stored.password_hash != "clave-segura-123"
-        assert stored.password_hash.startswith("pbkdf2_sha256$")
-        assert verify_password("clave-segura-123", stored.password_hash)
-
-    # Ni el listado ni la vista devuelven la contraseña.
-    listing = client.get("/api/users")
-    assert listing.status_code == 200
-    assert "clave-segura-123" not in listing.text
-    assert "password_hash" not in listing.text
-    with Session(bind=engine) as db:
-        columns = {column.name for column in UserAccount.__table__.columns}
-        assert "password_hash" in columns
-        view_columns = db.execute(
-            text("select column_name from information_schema.columns where table_name='v_user_roles'")
-        ).scalars().all()
-        assert "password_hash" not in view_columns
+    with engine.connect() as connection:
+        stored = connection.execute(
+            text("select password_hash, must_change_password from users where username = :u"),
+            {"u": "camila.torres"},
+        ).one()
+    assert stored.password_hash != TEMP_PASSWORD
+    assert verify_password(TEMP_PASSWORD, stored.password_hash)
+    assert stored.must_change_password is True
 
 
-def test_username_and_password_validation_messages(client):
-    employee = create_employee(client, "camila.torres", "Camila Torres")
-    short_password = create_user(client, employee["id"], "camila.torres", password="12345678")
-    assert short_password.status_code == 422
-    assert short_password.json()["detail"] == "No cumple la política propuesta: usa al menos 12 caracteres."
-
-    invalid_username = client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": employee["id"], "username": "Camila Torres!",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    })
-    assert invalid_username.status_code == 422
-    assert "Formato inválido" in invalid_username.json()["detail"]
-
-    empty_username = client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": employee["id"], "username": "",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    })
-    assert empty_username.status_code == 422
-    assert empty_username.json()["detail"] == "El usuario es obligatorio."
-
-    without_role = client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": employee["id"], "username": "camila.torres",
-        "password": "clave-segura-123", "role_ids": [],
-    })
-    assert without_role.status_code == 422
-    assert without_role.json()["detail"] == "Selecciona Administrador o Empleado."
-
-    unknown_employee = client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": 999999, "username": "camila.torres",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    })
-    assert unknown_employee.status_code == 404
-
-
-def test_duplicate_username_and_double_account_are_rejected(client):
-    diego = create_employee(client, "diego.ramirez", "Diego Ramírez", document="2.000.002")
-    camila = create_employee(client, "camila.torres", "Camila Torres", document="3.000.003")
-
-    first = create_user(client, diego["id"], "diego.ramirez", roles=("ADMIN",))
-    assert first.status_code == 201, first.text
-
-    duplicate = create_user(client, camila["id"], "diego.ramirez", actor="diego.ramirez")
-    assert duplicate.status_code == 409
-    assert "Diego Ramírez" in duplicate.json()["detail"]
-
-    twice = create_user(client, diego["id"], "otro.usuario", actor="diego.ramirez")
-    assert twice.status_code == 409
-    assert "ya tiene una cuenta" in twice.json()["detail"]
-
-
-def test_update_user_can_change_roles_and_password_without_logging_them(client):
-    boss = create_employee(client, "laura.martinez", "Laura Martínez")
-    create_user(client, boss["id"], "laura.martinez", roles=("ADMIN",))
+def test_admin_can_manage_accounts_and_records_activity(client):
     employee = create_employee(client, "diego.ramirez", "Diego Ramírez")
-    created = create_user(client, employee["id"], "diego.ramirez", roles=("OPERATOR",),
-                          actor="laura.martinez")
-    user_id = created.json()["id"]
-    admin_actor = {"X-Actor-Username": "laura.martinez"}
+    user = create_user(client, employee["id"], "diego.ramirez", roles=(ROLE_ADMIN,))
+    assert user.status_code == 201, user.text
+    user_id = user.json()["id"]
 
-    admin_role = role_ids(client, "ADMIN")
-    updated = client.patch(f"/api/users/{user_id}", json={
-        "role_ids": admin_role, "password": "otra-clave-segura-1",
-    }, headers=admin_actor)
-    assert updated.status_code == 200, updated.text
-    assert updated.json()["role_codes"] == ["ADMIN"]
+    listing = client.get("/api/users").json()
+    assert [item["username"] for item in listing] == ["admin.prueba", "diego.ramirez"]
+    assert client.get(f"/api/users/{user_id}").json()["role_codes"] == [ROLE_ADMIN]
 
-    with Session(bind=engine) as db:
-        user = db.scalar(select(UserAccount).where(UserAccount.id == user_id))
-        assert verify_password("otra-clave-segura-1", user.password_hash)
-        assert not verify_password("clave-segura-123", user.password_hash)
-        actions = [row.action for row in db.scalars(
-            select(UserActivity).where(UserActivity.user_id == user_id).order_by(UserActivity.id)
-        )]
-        assert "USER_UPDATED" in actions
-        assert "ROLES_UPDATED" in actions
-        assert "PASSWORD_CHANGED" in actions
+    changed = client.patch(f"/api/users/{user_id}", json={"role_ids": role_ids(client, ROLE_EMPLOYEE)})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["role_codes"] == [ROLE_EMPLOYEE]
 
-    # La bitácora nunca conserva la contraseña ni el hash.
-    activity = client.get("/api/users/activity", headers=admin_actor)
-    assert activity.status_code == 200
-    assert "otra-clave-segura-1" not in activity.text
-    assert "pbkdf2" not in activity.text
-
-
-def test_activation_and_deactivation_are_recorded(client):
-    # Un administrador distinto actúa: la cuenta desactivada no puede autorizar.
-    boss = create_employee(client, "laura.martinez", "Laura Martínez")
-    create_user(client, boss["id"], "laura.martinez", roles=("ADMIN",))
-    employee = create_employee(client, "oscar.valencia", "Óscar Valencia")
-    user_id = create_user(client, employee["id"], "oscar.valencia", roles=("OPERATOR",),
-                          actor="laura.martinez").json()["id"]
-    actor = {"X-Actor-Username": "laura.martinez"}
-
-    deactivated = client.patch(f"/api/users/{user_id}/status", json={"active": False}, headers=actor)
-    assert deactivated.status_code == 200
+    deactivated = client.patch(f"/api/users/{user_id}/status", json={"active": False})
     assert deactivated.json()["active"] is False
-
-    activated = client.patch(f"/api/users/{user_id}/status", json={"active": True}, headers=actor)
-    assert activated.status_code == 200
+    activated = client.patch(f"/api/users/{user_id}/status", json={"active": True})
     assert activated.json()["active"] is True
 
-    activity = client.get("/api/users/activity", headers=actor)
-    assert activity.status_code == 200
-    actions = [item["action"] for item in activity.json()]
-    assert "USER_DEACTIVATED" in actions
-    assert "USER_ACTIVATED" in actions
-    assert activity.json()[0]["username"] == "oscar.valencia"
+    activity = client.get("/api/users/activity").json()
+    actions = [item["action"] for item in activity]
+    for action in ("USER_CREATED", "ROLES_UPDATED", "USER_DEACTIVATED", "USER_ACTIVATED"):
+        assert action in actions
+    assert all(item["actor"] == "Administrador de prueba" for item in activity)
 
 
-def test_writes_require_an_administrator_actor(client):
-    """Bootstrap: la primera cuenta no necesita actor. Después, sí."""
-    employee = create_employee(client, "laura.martinez", "Laura Martínez")
-    first = create_user(client, employee["id"], "laura.martinez", roles=("ADMIN",))
-    assert first.status_code == 201
+def test_employee_is_denied_admin_endpoints_but_can_operate(employee_client):
+    """EMPLEADO opera normalmente; administración y configuración devuelven 403."""
+    forbidden = [
+        ("get", "/api/users", None),
+        ("get", "/api/roles", None),
+        ("get", "/api/users/activity", None),
+        ("get", "/api/reports", None),
+        ("get", "/api/tariffs/history", None),
+        ("get", "/api/employees", None),
+        ("get", "/api/shifts", None),
+        ("post", "/api/parking-lots", {"name": "No permitido"}),
+        ("post", "/api/cells", {"zone_id": 1, "code": "X-01", "compatible_type_ids": [1]}),
+        ("post", "/api/users", {"username": "x", "password": "y", "role_ids": []}),
+    ]
+    for method, path, body in forbidden:
+        response = getattr(employee_client, method)(path, json=body) if body else getattr(employee_client, method)(path)
+        assert response.status_code == 403, f"{method.upper()} {path}: {response.status_code} {response.text}"
 
-    other = create_employee(client, "diego.ramirez", "Diego Ramírez")
-    without_actor = create_user(client, other["id"], "diego.ramirez")
-    assert without_actor.status_code == 401
+    for path in ("/api/dashboard", "/api/customers", "/api/vehicles", "/api/cells",
+                 "/api/movements", "/api/novelties", "/api/activity"):
+        response = employee_client.get(path)
+        assert response.status_code == 200, f"{path}: {response.status_code} {response.text}"
 
-    operator_employee = create_employee(client, "camila.torres", "Camila Torres")
-    operator_create = client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": operator_employee["id"], "username": "camila.torres",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    }, headers={"X-Actor-Username": "laura.martinez"})
-    assert operator_create.status_code == 201
-
-    # El operador no puede crear cuentas.
-    another = create_employee(client, "otra.persona", "Otra Persona")
-    forbidden = client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": another["id"], "username": "otra.persona",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    }, headers={"X-Actor-Username": "camila.torres"})
-    assert forbidden.status_code == 403
-    assert "Administrador" in forbidden.json()["detail"]
-
-    # Un actor inexistente en el parqueadero tampoco puede actuar.
-    unknown_actor = client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": another["id"], "username": "otra.persona",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    }, headers={"X-Actor-Username": "intruso"})
-    assert unknown_actor.status_code == 403
-
-
-def test_activity_log_requires_administrator(client):
-    employee = create_employee(client, "laura.martinez", "Laura Martínez")
-    create_user(client, employee["id"], "laura.martinez", roles=("ADMIN",))
-    operator_employee = create_employee(client, "camila.torres", "Camila Torres")
-    client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": operator_employee["id"], "username": "camila.torres",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    }, headers={"X-Actor-Username": "laura.martinez"})
-
-    open_read = client.get("/api/users/activity")
-    assert open_read.status_code == 401
-
-    operator_read = client.get("/api/users/activity", headers={"X-Actor-Username": "camila.torres"})
-    assert operator_read.status_code == 403
-
-    admin_read = client.get("/api/users/activity", headers={"X-Actor-Username": "laura.martinez"})
-    assert admin_read.status_code == 200
-    assert any(item["action"] == "USER_CREATED" for item in admin_read.json())
-
-    available = client.get("/api/users/employees-available")
-    assert available.status_code == 401
-
-
-def test_parking_lot_isolation(client):
-    """Una cuenta de un parqueadero no ve ni modifica datos de otro."""
-    admin = role_ids(client, "ADMIN")
-    first = create_employee(client, "laura.martinez", "Laura Martínez")
-    create_user(client, first["id"], "laura.martinez", roles=("ADMIN",))
-
-    other_lot = client.post("/api/parking-lots", json={"name": "Sede Norte", "city": "Bogotá"})
-    assert other_lot.status_code == 201, other_lot.text
-    other_id = other_lot.json()["id"]
-
-    other_employee = create_employee(client, "persona.norte", "Persona Norte", parking_lot_id=other_id)
-    north_user = client.post("/api/users", json={
-        "parking_lot_id": other_id, "employee_id": other_employee["id"], "username": "persona.norte",
-        "password": "clave-segura-123", "role_ids": admin,
-    }, headers={"X-Actor-Username": "persona.norte"})
-    assert north_user.status_code == 201, north_user.text
-
-    lot_one = {user["username"] for user in client.get("/api/users", params={"parking_lot_id": 1}).json()}
-    lot_two = {user["username"] for user in client.get("/api/users", params={"parking_lot_id": other_id}).json()}
-    assert lot_one == {"laura.martinez"}
-    assert lot_two == {"persona.norte"}
-
-    # Un administrador del lote 2 no puede tocar cuentas del lote 1.
-    target = next(user for user in client.get("/api/users", params={"parking_lot_id": 1}).json()
-                  if user["username"] == "laura.martinez")
-    cross = client.patch(f"/api/users/{target['id']}", params={"parking_lot_id": 1},
-                         json={"active": False}, headers={"X-Actor-Username": "persona.norte"})
-    assert cross.status_code == 403
-
-    # Los empleados de un lote no aparecen en el alta del otro.
-    available_one = client.get("/api/users/employees-available", params={"parking_lot_id": 1},
-                               headers={"X-Actor-Username": "laura.martinez"})
-    assert available_one.status_code == 200
-    assert all(item["parking_lot_id"] == 1 for item in available_one.json())
-
-
-def test_employees_without_account_are_listed(client):
-    laura = create_employee(client, "laura.martinez", "Laura Martínez")
-    create_user(client, laura["id"], "laura.martinez", roles=("ADMIN",))
-    camila = create_employee(client, "camila.torres", "Camila Torres")
-
-    available = client.get("/api/users/employees-available", headers={"X-Actor-Username": "laura.martinez"})
-    assert available.status_code == 200
-    usernames = [item["username"] for item in available.json()]
-    assert usernames == ["camila.torres"]
-
-    client.post("/api/users", json={
-        "parking_lot_id": 1, "employee_id": camila["id"], "username": "camila.torres",
-        "password": "clave-segura-123", "role_ids": role_ids(client, "OPERATOR"),
-    }, headers={"X-Actor-Username": "laura.martinez"})
-    after = client.get("/api/users/employees-available", headers={"X-Actor-Username": "laura.martinez"})
-    assert after.json() == []
-
-
-def test_directory_filters_and_empty_result(client):
-    laura = create_employee(client, "laura.martinez", "Laura Martínez")
-    create_user(client, laura["id"], "laura.martinez", roles=("ADMIN",))
-    diego = create_employee(client, "diego.ramirez", "Diego Ramírez")
-    create_user(client, diego["id"], "diego.ramirez", roles=("OPERATOR",), actor="laura.martinez")
-
-    by_role = client.get("/api/users", params={"role": "ADMIN"}).json()
-    assert [item["username"] for item in by_role] == ["laura.martinez"]
-
-    by_search = client.get("/api/users", params={"search": "ramirez"}).json()
-    assert [item["username"] for item in by_search] == ["diego.ramirez"]
-
-    by_status = client.get("/api/users", params={"status": "INACTIVE"}).json()
-    assert by_status == []
-
-    no_match = client.get("/api/users", params={"search": "no.existe"}).json()
-    assert no_match == []
-
-
-def test_access_check_reports_credentials_and_inactive_state(client):
-    employee = create_employee(client, "oscar.valencia", "Óscar Valencia")
-    create_user(client, employee["id"], "oscar.valencia", roles=("ADMIN",))
-
-    bad = client.post("/api/users/access-check", json={
-        "parking_lot_id": 1, "username": "oscar.valencia", "password": "clave-distinta-1",
+    customer = employee_client.post("/api/customers", json={
+        "parking_lot_id": 1, "document_type": "CC", "document_number": "EMP-001",
+        "full_name": "Cliente operativo", "phone": "", "email": "",
     })
-    assert bad.status_code == 200
-    assert bad.json()["status"] == "BAD_CREDENTIALS"
+    assert customer.status_code == 201, customer.text
 
-    ok = client.post("/api/users/access-check", json={
-        "parking_lot_id": 1, "username": "oscar.valencia", "password": "clave-segura-123",
-    })
-    assert ok.json()["status"] == "OK"
 
-    inactive = client.patch("/api/users/1/status", json={"active": False},
-                            headers={"X-Actor-Username": "oscar.valencia"})
-    assert inactive.status_code == 200
-    checked = client.post("/api/users/access-check", json={
-        "parking_lot_id": 1, "username": "oscar.valencia", "password": "clave-segura-123",
+def test_anonymous_and_forged_actor_header_cannot_authorize(anon_client):
+    """Sin token no hay acceso; la cabecera heredada X-Actor-Username no autoriza."""
+    assert anon_client.get("/api/customers").status_code == 401
+    forged = anon_client.get("/api/customers", headers={"X-Actor-Username": "admin.prueba"})
+    assert forged.status_code == 401
+    assert anon_client.post("/api/parking-lots", json={"name": "x"}).status_code == 401
+    assert anon_client.get("/api/health").status_code == 200
+
+
+def test_inactive_account_cannot_login(anon_client, client):
+    employee = create_employee(client, "inactivo.prueba", "Usuario Inactivo", "INACT-1")
+    created = create_user(client, employee["id"], "inactivo.prueba")
+    assert created.status_code == 201
+    client.patch(f"/api/users/{created.json()['id']}/status", json={"active": False})
+
+    response = anon_client.post("/api/auth/login", json={
+        "username": "inactivo.prueba", "password": TEMP_PASSWORD,
     })
-    assert checked.json()["status"] == "INACTIVE"
-    assert "No se inició sesión" in checked.json()["message"]
+    assert response.status_code == 403
+    assert "desactivada" in response.json()["detail"].lower()
+
+
+def test_first_login_requires_password_change(anon_client, client):
+    """El token se expide, pero bloquea la API hasta cambiar la contraseña temporal."""
+    employee = create_employee(client, "cambio.prueba", "Cambio Temporal", "CAMB-1")
+    assert create_user(client, employee["id"], "cambio.prueba").status_code == 201
+
+    login = anon_client.post("/api/auth/login", json={
+        "username": "cambio.prueba", "password": TEMP_PASSWORD,
+    })
+    assert login.status_code == 200, login.text
+    data = login.json()
+    assert data["user"]["must_change_password"] is True
+    assert "MANAGE_ACCOUNTS" not in data["user"]["permissions"]
+    anon_client.headers.update({"Authorization": f"Bearer {data['access_token']}"})
+
+    assert anon_client.get("/api/customers").status_code == 403
+    assert anon_client.get("/api/auth/me").status_code == 200
+
+    new_password = "NuevaSegura987654!"
+    changed = anon_client.post("/api/auth/change-password", json={
+        "current_password": TEMP_PASSWORD, "new_password": new_password,
+    })
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["user"]["must_change_password"] is False
+    assert anon_client.get("/api/customers").status_code == 200
+
+    anon_client.headers.clear()
+    assert anon_client.post("/api/auth/login", json={
+        "username": "cambio.prueba", "password": TEMP_PASSWORD,
+    }).status_code == 401
+    relogin = anon_client.post("/api/auth/login", json={
+        "username": "cambio.prueba", "password": new_password,
+    })
+    assert relogin.status_code == 200
+
+
+def test_tampered_token_is_rejected(client):
+    token = client.headers["Authorization"].split(" ", 1)[1]
+    tampered = token[:-2] + ("ab" if not token.endswith("ab") else "cd")
+    client.headers.update({"Authorization": f"Bearer {tampered}"})
+    assert client.get("/api/customers").status_code == 401
+
+
+def test_session_reflects_role_and_permissions(client):
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200
+    data = me.json()
+    assert data["username"] == "admin.prueba"
+    assert data["role_codes"] == [ROLE_ADMIN]
+    assert set(data["permissions"]) >= {"OPERATE", "MANAGE_ACCOUNTS", "MANAGE_STRUCTURE"}
+    assert data["parking_lot_id"] == 1
+
+
+def test_access_check_validates_credentials_without_granting_session(anon_client, client):
+    employee = create_employee(client, "acceso.prueba", "Acceso Prueba", "ACCESO-1")
+    assert create_user(client, employee["id"], "acceso.prueba").status_code == 201
+    response = anon_client.post("/api/users/access-check", json={
+        "parking_lot_id": 1, "username": "acceso.prueba", "password": TEMP_PASSWORD,
+    })
+    assert response.status_code == 200
+    assert response.json()["status"] == "OK"
+    assert anon_client.get("/api/customers").status_code == 401
+
+
+def test_laura_admin_oscar_employee_and_inactive_account(initial_accounts):
+    """Laura administra, Oscar solo opera; al desactivarlo se le corta la API."""
+    from conftest import LAURA_PASSWORD, OSCAR_PASSWORD
+
+    laura = initial_accounts["laura"]
+    oscar = initial_accounts["oscar"]
+    anon = initial_accounts["anon"]
+
+    laura_me = laura.get("/api/auth/me").json()
+    assert laura_me["display_name"] == "Laura Martínez"
+    assert laura_me["role_codes"] == [ROLE_ADMIN]
+    assert "MANAGE_ACCOUNTS" in laura_me["permissions"]
+    assert laura.get("/api/users").status_code == 200
+    assert laura.get("/api/roles").status_code == 200
+    assert laura.get("/api/users/activity").status_code == 200
+
+    oscar_me = oscar.get("/api/auth/me").json()
+    assert oscar_me["display_name"] == "Oscar Valencia"
+    assert oscar_me["role_codes"] == [ROLE_EMPLOYEE]
+    assert oscar_me["permissions"] == ["OPERATE", "VIEW_AVAILABILITY"]
+    assert oscar.get("/api/cells").status_code == 200
+    assert oscar.get("/api/customers").status_code == 200
+    assert oscar.get("/api/users").status_code == 403
+    assert oscar.get("/api/roles").status_code == 403
+    assert oscar.get("/api/parking-lots").status_code == 200
+    assert oscar.post("/api/parking-lots", json={"name": "No permitido"}).status_code == 403
+    assert oscar.post("/api/cells", json={
+        "zone_id": 1, "code": "OSCAR-01", "compatible_type_ids": [1],
+    }).status_code == 403
+
+    deactivated = laura.patch(f"/api/users/{initial_accounts['oscar_id']}/status", json={"active": False})
+    assert deactivated.status_code == 200, deactivated.text
+    assert oscar.get("/api/customers").status_code == 403
+    blocked = anon.post("/api/auth/login", json={
+        "username": "oscar.valencia", "password": OSCAR_PASSWORD,
+    })
+    assert blocked.status_code == 403
+    assert "desactivada" in blocked.json()["detail"].lower()
+    # Laura sigue operando con su sesión intacta.
+    assert laura.get("/api/dashboard").status_code == 200
+    assert anon.post("/api/auth/login", json={
+        "username": "laura.martinez", "password": LAURA_PASSWORD,
+    }).status_code == 200

@@ -23,6 +23,8 @@ services:
       # Conexión directa usada por Alembic para las migraciones (evita el error
       # de prepared statements del pooler). Si falta, se usa DATABASE_URL.
       DATABASE_URL_UNPOOLED: ${DATABASE_URL_UNPOOLED:-}
+      # Firma de los tokens de sesión (mínimo 32 caracteres).
+      SESSION_SECRET: ${SESSION_SECRET:?Define SESSION_SECRET para firmar las sesiones}
       # Mismo contrato que en Render: la app escucha en ${PORT}.
       PORT: "8000"
       WEB_CONCURRENCY: "1"

@@ -1,3 +1,55 @@
+@if (page === 'login') {
+  <div class="auth-screen">
+    <form class="auth-card" (ngSubmit)="submitLogin()">
+      <span class="brand-mark" aria-hidden="true">A/</span>
+      <h1>Autos Colombia</h1>
+      <p class="auth-subtitle">Ingresa con tu cuenta para continuar.</p>
+      <div class="campo">
+        <label for="auth-username">Usuario</label>
+        <input id="auth-username" name="auth-username" type="text" autocomplete="username"
+               [(ngModel)]="loginForm.username" placeholder="laura.martinez" required />
+      </div>
+      <div class="campo">
+        <label for="auth-password">Contraseña</label>
+        <input id="auth-password" name="auth-password" type="password" autocomplete="current-password"
+               [(ngModel)]="loginForm.password" placeholder="••••••••••••" required />
+      </div>
+      @if (loginError) {
+        <p class="message message--error" role="alert">{{ loginError }}</p>
+      }
+      <button class="button button-primary" type="submit" [disabled]="loginBusy">
+        {{ loginBusy ? 'Ingresando…' : 'Ingresar' }}
+      </button>
+      <p class="auth-footnote">Sesión persistentemente identificada por rol y permisos.</p>
+    </form>
+  </div>
+} @else if (page === 'change-password') {
+  <div class="auth-screen">
+    <form class="auth-card" (ngSubmit)="submitChangePassword()">
+      <span class="brand-mark" aria-hidden="true">A/</span>
+      <h1>Cambia tu contraseña</h1>
+      <p class="auth-subtitle">Tu cuenta usa una contraseña temporal. Define una nueva para continuar.</p>
+      <div class="campo">
+        <label for="change-current">Contraseña temporal</label>
+        <input id="change-current" name="change-current" type="password" autocomplete="current-password"
+               [(ngModel)]="changeForm.currentPassword" required />
+      </div>
+      <div class="campo">
+        <label for="change-new">Nueva contraseña</label>
+        <input id="change-new" name="change-new" type="password" autocomplete="new-password"
+               [(ngModel)]="changeForm.newPassword" minlength="12" required />
+        <span class="field-hint">Mínimo 12 caracteres y distinta de la anterior.</span>
+      </div>
+      @if (changeError) {
+        <p class="message message--error" role="alert">{{ changeError }}</p>
+      }
+      <button class="button button-primary" type="submit" [disabled]="changeBusy">
+        {{ changeBusy ? 'Actualizando…' : 'Actualizar contraseña' }}
+      </button>
+      <button class="button button-secondary" type="button" (click)="logout()">Cancelar y salir</button>
+    </form>
+  </div>
+} @else {
 <div class="app-shell">
   <aside class="sidebar" aria-label="Navegación principal">
     <div class="brand">
@@ -9,7 +61,7 @@
     </div>
 
     <nav class="nav" aria-label="Módulos de navegación">
-      @for (section of navSections; track section.label) {
+      @for (section of visibleNavSections; track section.label) {
         <div class="nav-section">
           <p class="nav-section-title">{{ section.label }}</p>
           @for (item of section.items; track item.id) {
@@ -80,8 +132,9 @@
       </div>
 
       <div class="user-menu">
-        <span class="user-menu-name">Administrador</span>
-        <span class="user-menu-role">Sesión demo</span>
+        <span class="user-menu-name">{{ auth.displayName() || 'Usuario' }}</span>
+        <span class="user-menu-role">{{ auth.roleLabel() }}</span>
+        <button class="button button-secondary" type="button" (click)="logout()">Salir</button>
       </div>
     </header>
 
@@ -2514,41 +2567,50 @@
               }
             </section>
 
-            <section class="panel map-detail-panel">
-              <h2 class="map-detail-title">Configurar celda</h2>
-              @if (mapCell; as celda) {
-                <p class="map-detail-row">
-                  <span>Código</span>
-                  <strong>{{ celda.code }}</strong>
-                </p>
-                <p class="map-detail-row">
-                  <span>Estado</span>
-                  <strong>{{ mapCellStateName }}</strong>
-                </p>
-                <button
-                  class="button button-secondary map-detail-action"
-                  type="button"
-                  [disabled]="celda.occupied"
-                  (click)="applyCellStatus()"
-                >
-                  {{ celda.operational_status === 'ACTIVE' ? 'Pasar a mantenimiento' : 'Reactivar celda' }}
-                </button>
-                @if (celda.occupied) {
-                  <p class="map-detail-note">
-                    No puedes poner una celda ocupada en mantenimiento. Registra primero la salida
-                    del vehículo.
+            @if (can(permissions.MANAGE_CELLS)) {
+              <section class="panel map-detail-panel">
+                <h2 class="map-detail-title">Configurar celda</h2>
+                @if (mapCell; as celda) {
+                  <p class="map-detail-row">
+                    <span>Código</span>
+                    <strong>{{ celda.code }}</strong>
                   </p>
+                  <p class="map-detail-row">
+                    <span>Estado</span>
+                    <strong>{{ mapCellStateName }}</strong>
+                  </p>
+                  <button
+                    class="button button-secondary map-detail-action"
+                    type="button"
+                    [disabled]="celda.occupied"
+                    (click)="applyCellStatus()"
+                  >
+                    {{ celda.operational_status === 'ACTIVE' ? 'Pasar a mantenimiento' : 'Reactivar celda' }}
+                  </button>
+                  @if (celda.occupied) {
+                    <p class="map-detail-note">
+                      No puedes poner una celda ocupada en mantenimiento. Registra primero la salida
+                      del vehículo.
+                    </p>
+                  }
+                } @else {
+                  <p class="map-detail-empty">Sin celda seleccionada.</p>
                 }
-              } @else {
-                <p class="map-detail-empty">Sin celda seleccionada.</p>
-              }
-            </section>
+              </section>
+            } @else {
+              <section class="panel map-detail-panel">
+                <h2 class="map-detail-title">Consulta de celda</h2>
+                <p class="map-detail-empty">
+                  Tu rol permite consultar celdas; configurarlas requiere autorización de administrador.
+                </p>
+              </section>
+            }
           </aside>
         </section>
 
       }
 
-      @if (page === 'cells' && cellsTab === 'registration') {
+      @if (page === 'cells' && cellsTab === 'registration' && can(permissions.MANAGE_CELLS)) {
         <div class="reg-intro">
           <strong>Formularios conectados a la API</strong>
           <span>
@@ -5240,25 +5302,11 @@
                 </div>
                 <p class="panel-note">{{ roleDescription(account) }}</p>
 
-                <div class="campo">
-                  <label for="actorSelect">Cuenta que actúa (demostración)</label>
-                  <select
-                    id="actorSelect"
-                    name="actorSelect"
-                    [ngModel]="actorUsername"
-                    (ngModelChange)="switchActor($event)"
-                  >
-                    <option value="">Sin cuenta · cerrar sesión</option>
-                    @for (row of activeAccounts; track row.id) {
-                      <option [value]="row.username">
-                        {{ row.employee_name }} · {{ roleLabel(row) }}
-                      </option>
-                    }
-                  </select>
-                  <span class="field-hint">
-                    Esta interfaz no usa sesiones: la API recibe la cuenta en la cabecera
-                    X-Actor-Username.
-                  </span>
+                <div class="data-rows">
+                  <p>
+                    <span>Sesión iniciada como</span>
+                    <strong>{{ auth.displayName() }} · {{ auth.roleLabel() }}</strong>
+                  </p>
                 </div>
 
                 @if (showMyPermissions) {
@@ -5280,7 +5328,7 @@
                   >
                     {{ showMyPermissions ? 'Ocultar mis permisos' : 'Ver mis permisos' }}
                   </button>
-                  <button class="button button-secondary" type="button" (click)="switchActor('')">
+                  <button class="button button-secondary" type="button" (click)="logout()">
                     Cerrar sesión
                   </button>
                 </div>
@@ -6407,3 +6455,5 @@
     </section>
   </main>
 </div>
+}
+<router-outlet></router-outlet>

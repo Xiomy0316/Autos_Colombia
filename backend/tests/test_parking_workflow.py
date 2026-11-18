@@ -87,25 +87,24 @@ def test_entry_is_blocked_until_prepaid_period_starts(client):
     assert not_yet_covered.status_code == 409
 
 
-def test_parking_lots_keep_inventory_and_customers_separate(client):
+def test_session_cannot_operate_on_another_parking_lot(client):
+    """La sesión determina el parqueadero: pedir otro se rechaza con 403."""
     second_lot = client.post("/api/parking-lots", json={"name": "Parqueadero de prueba", "tax_id": "900123456"})
     assert second_lot.status_code == 201, second_lot.text
     lot_id = second_lot.json()["id"]
 
-    second_bootstrap = client.get(f"/api/bootstrap?parking_lot_id={lot_id}").json()
-    assert second_bootstrap["parking_lot"]["name"] == "Parqueadero de prueba"
-    assert second_bootstrap["sites"] == []
-    assert client.get(f"/api/zones?parking_lot_id={lot_id}").json() == []
-    assert client.get(f"/api/cells?parking_lot_id={lot_id}").json() == []
-    assert client.get(f"/api/dashboard?parking_lot_id={lot_id}").json()["cells_total"] == 0
+    assert client.get(f"/api/bootstrap?parking_lot_id={lot_id}").status_code == 403
+    assert client.get(f"/api/zones?parking_lot_id={lot_id}").status_code == 403
+    assert client.get(f"/api/cells?parking_lot_id={lot_id}").status_code == 403
+    assert client.get(f"/api/dashboard?parking_lot_id={lot_id}").status_code == 403
 
     customer = client.post("/api/customers", json={
         "parking_lot_id": lot_id, "document_type": "CC", "document_number": "100200300",
         "full_name": "Cliente de otro parqueadero", "phone": "", "email": "",
     })
-    assert customer.status_code == 201
+    assert customer.status_code == 403
     assert client.get("/api/customers?parking_lot_id=1").json() == []
-    assert len(client.get(f"/api/customers?parking_lot_id={lot_id}").json()) == 1
+    assert client.get("/api/bootstrap").json()["parking_lot"]["id"] == 1
 
     first_lot_customer = create_customer(client, document="FIRST-LOT")
     vehicle = create_vehicle(client, first_lot_customer["id"], plate="FIRST1")
@@ -113,33 +112,30 @@ def test_parking_lots_keep_inventory_and_customers_separate(client):
     cell = next(item for item in client.get("/api/cells?parking_lot_id=1").json() if item["code"] == "C-01")
     movement = client.post("/api/movements/entry", json={"vehicle_id": vehicle["id"], "cell_id": cell["id"]}).json()
     cross_lot_exit = client.post(f"/api/movements/{movement['id']}/exit?parking_lot_id={lot_id}", json={})
-    assert cross_lot_exit.status_code == 404
+    assert cross_lot_exit.status_code == 403
     assert client.get("/api/movements?active=true&parking_lot_id=1").json()
 
 
-def test_new_parking_lot_is_built_with_sites_zones_and_cells(client):
-    """Un parqueadero nuevo nace vacío y su inventario se construye paso a paso."""
+def test_new_parking_lot_cannot_be_built_from_another_lot_session(client):
+    """Crear parqueadero es administrativo, pero configurar otro lot está fuera de la sesión."""
     lot = client.post("/api/parking-lots", json={"name": "Parqueadero en construcción", "city": "Medellín"})
     assert lot.status_code == 201, lot.text
     lot_id = lot.json()["id"]
 
     site = client.post("/api/sites", json={"parking_lot_id": lot_id, "name": "Sede norte", "address": "Calle 10"})
-    assert site.status_code == 201, site.text
-    zone = client.post("/api/zones", json={"site_id": site.json()["id"], "name": "Zona autos", "code": "au"})
-    assert zone.status_code == 201, zone.text
-    assert zone.json()["code"] == "AU"
+    assert site.status_code == 403
+    zone = client.post("/api/zones", json={"site_id": 1, "name": "Zona autos", "code": "au"},
+                       params={"parking_lot_id": lot_id})
+    assert zone.status_code == 403
     cell = client.post("/api/cells", json={
-        "zone_id": zone.json()["id"], "code": "au-01", "compatible_type_ids": [1],
-    })
-    assert cell.status_code == 201, cell.text
-    assert cell.json()["code"] == "AU-01"
+        "zone_id": 1, "code": "au-01", "compatible_type_ids": [1],
+    }, params={"parking_lot_id": lot_id})
+    assert cell.status_code == 403
 
     summary = next(item for item in client.get("/api/parking-lots").json() if item["id"] == lot_id)
-    assert summary["sites_count"] == 1
-    assert summary["zones_count"] == 1
-    assert summary["cells_total"] == 1
-    assert summary["cells_available"] == 1
-    assert client.get(f"/api/dashboard?parking_lot_id={lot_id}").json()["cells_total"] == 1
+    assert summary["sites_count"] == 0
+    assert summary["zones_count"] == 0
+    assert summary["cells_total"] == 0
 
 
 def test_duplicate_plate_and_cell_maintenance_rules(client):

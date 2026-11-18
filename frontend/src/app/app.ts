@@ -3,6 +3,10 @@ import localeEsCo from '@angular/common/locales/es-CO';
 import type { HttpErrorResponse } from '@angular/common/http';
 import { ChangeDetectorRef, Component, ElementRef, type OnInit, ViewChild, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { Router, RouterOutlet } from '@angular/router';
+
+import { AuthService, PERMISSIONS, type Permission } from './auth.service';
+import { NavigationService, type AppView, type Page } from './navigation.service';
 import {
   ApiService,
   type ActivityItem,
@@ -32,25 +36,6 @@ import {
 } from './api.service';
 
 registerLocaleData(localeEsCo);
-
-type Page =
-  | 'dashboard'
-  | 'vehicles'
-  | 'customers'
-  | 'cells'
-  | 'history'
-  | 'payments'
-  | 'payments-register'
-  | 'novelties'
-  | 'settings'
-  | 'entry'
-  | 'exit'
-  | 'parking-lots'
-  | 'employees'
-  | 'users'
-  | 'users-form'
-  | 'reports'
-  | 'tariffs';
 
 /** Pestañas del módulo de empleados y turnos. */
 type EmployeeTab = 'team' | 'roles' | 'activity';
@@ -174,12 +159,15 @@ interface MapZone {
 
 @Component({
   selector: 'app-root',
-  imports: [CommonModule, FormsModule, DatePipe],
+  imports: [CommonModule, FormsModule, DatePipe, RouterOutlet],
   templateUrl: './app.html',
   styleUrl: './app.scss',
 })
 export class App implements OnInit {
   private readonly api = inject(ApiService);
+  readonly auth = inject(AuthService);
+  private readonly navigation = inject(NavigationService);
+  private readonly router = inject(Router);
   private readonly changeDetector = inject(ChangeDetectorRef);
   /** Area de contenido con scroll propio: se reinicia al cambiar de modulo. */
   @ViewChild('workspace') private workspaceRef?: ElementRef<HTMLElement>;
@@ -307,7 +295,13 @@ export class App implements OnInit {
       contexto: 'Cierra el movimiento activo y libera la celda. El historial se conserva.',
     },
   };
-  page: Page = 'dashboard';
+  page: AppView = 'login';
+  loginForm = { username: '', password: '' };
+  loginError = '';
+  loginBusy = false;
+  changeForm = { currentPassword: '', newPassword: '' };
+  changeError = '';
+  changeBusy = false;
   readonly today = new Date();
   busy = false;
   error = '';
@@ -373,8 +367,6 @@ export class App implements OnInit {
    * Cuenta que actúa. No hay sesiones: la API la recibe en X-Actor-Username.
    * Al iniciar se usa la primera cuenta activa con rol Administrador.
    */
-  actorUsername = '';
-  private actorManual = false;
   /** Detalle de un 401/403 de la API: alimenta el estado «Acceso restringido». */
   usersPermissionError = '';
   selectedUserId = 0;
@@ -780,16 +772,34 @@ export class App implements OnInit {
     return sitio?.name ?? 'Sede principal';
   }
 
+  /** Vista actual ya filtrada por el Router (login/cambio se renderizan aparte). */
+  get currentPage(): Page { return this.page as Page; }
+
+  can(permission: Permission | string): boolean { return this.auth.has(permission); }
+  canPage(page: Page): boolean { return this.auth.canPage(page); }
+
+  /** Menú lateral: el Router y la API aplican la misma matriz de permisos. */
+  get visibleNavSections(): typeof this.navSections {
+    return this.navSections
+      .map((section) => ({
+        ...section,
+        items: section.items.filter((item) => this.canPage(item.id)),
+      }))
+      .filter((section) => section.items.length > 0);
+  }
+
+  readonly permissions = PERMISSIONS;
+
   /** Título del encabezado; en ocupación y celdas depende de la pestaña. */
   get pageTitle(): string {
     if (this.page === 'cells') return CELLS_TAB_META[this.cellsTab].title;
-    return this.pageMeta[this.page].titulo;
+    return this.pageMeta[this.currentPage].titulo;
   }
 
   /** Ruta de migas; en ocupación y celdas depende de la pestaña. */
   get pageRoute(): string {
     if (this.page === 'cells') return CELLS_TAB_META[this.cellsTab].route;
-    return this.pageMeta[this.page].ruta;
+    return this.pageMeta[this.currentPage].ruta;
   }
 
   /** Contexto de la pantalla; en ocupación y celdas depende de la pestaña. */
@@ -806,7 +816,7 @@ export class App implements OnInit {
     if (this.page === 'customers') {
       return `Consulta los propietarios y administra sus datos en ${this.customerScopeName}.`;
     }
-    return this.pageMeta[this.page].contexto;
+    return this.pageMeta[this.currentPage].contexto;
   }
 
   /** Celdas del mapa después de aplicar búsqueda y filtros. */
@@ -1982,10 +1992,37 @@ export class App implements OnInit {
   }
 
   ngOnInit(): void {
-    this.loadAll();
+    this.navigation.view$.subscribe((view) => {
+      if (view === this.page) return;
+      this.page = view;
+      this.error = '';
+      if (view !== 'login' && view !== 'change-password') this.applyPage(view);
+      if (view === 'dashboard' || view === 'login' || view === 'change-password') {
+        this.changeDetector.detectChanges();
+      }
+    });
+
+    if (!this.auth.isAuthenticated()) {
+      void this.router.navigate(['/login']);
+      return;
+    }
+    this.auth.me().subscribe({
+      next: () => {
+        if (this.auth.mustChangePassword()) {
+          void this.router.navigate(['/change-password']);
+          return;
+        }
+        this.loadAll();
+      },
+      error: () => {
+        this.auth.logout();
+        void this.router.navigate(['/login']);
+      },
+    });
   }
 
   loadAll(): void {
+    if (!this.auth.isAuthenticated() || this.auth.mustChangePassword()) return;
     this.busy = true;
     this.error = '';
     this.api.bootstrap(this.selectedLotId || undefined).subscribe({
@@ -2061,7 +2098,6 @@ export class App implements OnInit {
   }
 
   refreshLists(): void {
-    this.initActor();
     this.api.customers().subscribe({
       next: (data) => {
         this.customers = data;
@@ -2166,8 +2202,74 @@ export class App implements OnInit {
     });
   }
 
+  submitLogin(): void {
+    if (!this.loginForm.username.trim() || !this.loginForm.password) {
+      this.loginError = 'Ingresa tu usuario y contraseña.';
+      return;
+    }
+    this.loginBusy = true;
+    this.loginError = '';
+    this.auth.login(this.loginForm.username.trim(), this.loginForm.password).subscribe({
+      next: () => {
+        this.loginBusy = false;
+        this.loginForm.password = '';
+        const session = this.auth.session();
+        if (session) {
+          this.selectedLotId = session.parking_lot_id;
+          this.api.setParkingLot(session.parking_lot_id);
+        }
+        if (this.auth.mustChangePassword()) {
+          void this.router.navigate(['/change-password']);
+        } else {
+          this.loadAll();
+          void this.router.navigate(['/dashboard']);
+        }
+      },
+      error: (error: unknown) => {
+        this.loginBusy = false;
+        this.loginError = this.errorDetail(error);
+      },
+    });
+  }
+
+  submitChangePassword(): void {
+    const { currentPassword, newPassword } = this.changeForm;
+    if (!currentPassword || !newPassword) {
+      this.changeError = 'Ingresa la contraseña temporal y la nueva.';
+      return;
+    }
+    this.changeBusy = true;
+    this.changeError = '';
+    this.auth.changePassword(currentPassword, newPassword).subscribe({
+      next: () => {
+        this.changeBusy = false;
+        this.changeForm = { currentPassword: '', newPassword: '' };
+        this.loadAll();
+        void this.router.navigate(['/dashboard']);
+      },
+      error: (error: unknown) => {
+        this.changeBusy = false;
+        this.changeError = this.errorDetail(error);
+      },
+    });
+  }
+
+  private errorDetail(error: unknown): string {
+    const response = error as { error?: { detail?: string } };
+    return response?.error?.detail ?? 'No fue posible completar la operación.';
+  }
+
+  /** Navegación real: cambia la URL y deja que el guard decida si se entra. */
   navigate(page: Page): void {
-    this.page = page;
+    void this.router.navigate([page]);
+  }
+
+  /** Efectos de entrada a una vista ya autorizada por el guard. */
+  private applyPage(page: Page): void {
+    if (!this.auth.canPage(page)) {
+      void this.router.navigate(['/dashboard']);
+      return;
+    }
     this.search = '';
     this.vehicleStatusFilter = 'TODAS';
     this.historyPage = 1;
@@ -3566,7 +3668,6 @@ export class App implements OnInit {
       .subscribe({
         next: (rows) => {
           this.users = rows;
-          this.resolveActor(rows);
           if (!this.selectedUserId && rows.length) this.selectedUserId = rows[0].id;
           if (this.statusTarget) {
             this.statusTarget = rows.find((row) => row.id === this.statusTarget?.id) ?? null;
@@ -3626,40 +3727,14 @@ export class App implements OnInit {
     });
   }
 
-  /**
-   * Determina la cuenta que actúa sin abrir el módulo de usuarios: los cambios
-   * de estado de celdas se registran con responsable desde el primer minuto.
-   */
-  private initActor(): void {
-    if (this.actorUsername) return;
-    this.api.users({}).subscribe({
-      next: (rows) => this.resolveActor(rows),
-      // Sin cuentas conocidas, el backend registra el cambio como «Sistema».
-      error: () => undefined,
-    });
+  /** La identidad la decide la sesión firmada; nunca se suplanta con la UI. */
+  get actorUsername(): string {
+    return this.auth.session()?.username ?? '';
   }
 
-  /**
-   * Determina la cuenta que actúa. Sin sesiones, la interfaz usa la primera
-   * cuenta activa con rol Administrador; se puede cambiar desde «Mi perfil».
-   */
-  private resolveActor(rows: UserRoleRow[]): void {
-    if (this.actorManual) {
-      this.api.setActor(this.actorUsername);
-      return;
-    }
-    const admin = rows.find((row) => row.active && row.role_codes.includes('ADMIN'));
-    this.actorUsername = admin ? admin.username : '';
-    this.api.setActor(this.actorUsername);
-  }
-
-  /** Cambia (o cierra) la cuenta que actúa: demuestra la autorización real. */
-  switchActor(username: string): void {
-    this.actorUsername = username;
-    this.actorManual = true;
-    this.api.setActor(username);
-    this.usersPermissionError = '';
-    this.loadUsers(true);
+  logout(): void {
+    this.auth.logout();
+    void this.router.navigate(['/login']);
   }
 
   /** Errores del módulo: 401/403 alimentan «Acceso restringido». */
@@ -4149,11 +4224,7 @@ export class App implements OnInit {
 
   /** Permisos concretos de la cuenta que actúa. */
   get actorPermissions(): string[] {
-    const account = this.actorAccount;
-    if (!account) return [];
-    return this.userRoles
-      .filter((role) => account.role_codes.includes(role.code))
-      .flatMap((role) => role.permissions);
+    return [...(this.auth.session()?.permissions ?? [])].sort();
   }
 
   /** Primer nombre de una cuenta (título de la acción de guardado). */
@@ -4253,7 +4324,9 @@ export class App implements OnInit {
     { code: 'OPERATE', label: 'Registrar ingresos, salidas, pagos y novedades' },
     { code: 'VIEW_AVAILABILITY', label: 'Consultar disponibilidad y celdas compatibles' },
     { code: 'MANAGE_ACCOUNTS', label: 'Crear, editar, activar o desactivar cuentas' },
-    { code: 'MANAGE_STRUCTURE', label: 'Gestionar sedes, zonas y configuración de celdas' },
+    { code: 'MANAGE_STRUCTURE', label: 'Gestionar parqueaderos, sedes, zonas y tarifas' },
+    { code: 'MANAGE_CELLS', label: 'Configurar y modificar celdas (solo con autorización)' },
+    { code: 'VIEW_HISTORY', label: 'Consultar el historial administrativo de movimientos' },
     { code: 'VIEW_ACTIVITY', label: 'Consultar bitácora administrativa' },
   ];
 
