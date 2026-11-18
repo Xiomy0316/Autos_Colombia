@@ -1396,9 +1396,11 @@ def list_payments(parking_lot_id: int | None = None, db: Session = Depends(get_d
     lot_id = resolve_parking_lot(db, parking_lot_id)
     payments = db.scalars(select(Payment).join(MonthlyContract).join(Vehicle).where(Vehicle.parking_lot_id == lot_id)
                           .options(joinedload(Payment.contract).joinedload(MonthlyContract.vehicle)).order_by(Payment.paid_at.desc()).limit(100)).unique().all()
+    employee_names = {employee.id: employee.full_name for employee in db.scalars(select(Employee)).all()}
     return [{"id": item.id, "plate": item.contract.vehicle.plate, "amount": money_float(item.amount),
              "paid_at": item.paid_at.isoformat(), "period_start": item.period_start.isoformat(),
-             "period_end": item.period_end.isoformat(), "method": item.method} for item in payments]
+             "period_end": item.period_end.isoformat(), "method": item.method,
+             "employee_id": item.employee_id, "employee": employee_names.get(item.employee_id)} for item in payments]
 
 
 @app.get("/api/novelties", dependencies=[Depends(permit("OPERATE"))])
@@ -1416,14 +1418,18 @@ def list_novelties(parking_lot_id: int | None = None, db: Session = Depends(get_
 
 @app.post("/api/novelties", status_code=201, dependencies=[Depends(permit("OPERATE"))])
 def create_novelty(payload: NoveltyCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
-    if not db.get(Vehicle, payload.vehicle_id):
+    actor = session_actor()
+    vehicle = db.get(Vehicle, payload.vehicle_id)
+    if not vehicle:
         raise HTTPException(404, "Vehículo no encontrado")
-    novelty = Novelty(**payload.model_dump())
+    novelty = Novelty(**payload.model_dump(), employee_id=actor.employee_id)
     db.add(novelty)
+    record_activity(db, lot_id=actor.parking_lot_id, action="NOVELTY_RECORDED", detail=f"{novelty.category} · {vehicle.plate}", actor=actor.display_name, user_id=actor.user_id, employee_id=actor.employee_id)
     db.commit()
     db.refresh(novelty)
     return {"id": novelty.id, "vehicle_id": novelty.vehicle_id, "category": novelty.category,
-            "description": novelty.description, "created_at": novelty.created_at.isoformat(), "status": novelty.status}
+            "description": novelty.description, "created_at": novelty.created_at.isoformat(), "status": novelty.status,
+            "employee_id": actor.employee_id, "employee": actor.display_name}
 
 
 # --------------------------------------------------------------------------- #

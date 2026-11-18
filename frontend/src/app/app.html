@@ -409,11 +409,6 @@
           </div>
         </section>
 
-        <div class="context-note">
-          <strong>! Inventario de ejemplo · Capacidad por confirmar</strong>
-          <span>{{ demoInventoryNote }}</span>
-        </div>
-
         <p class="page-footer">
           Autos Colombia · {{ parkingName }} · Datos ficticios de demostración · Solo mensualidades
           · COP
@@ -625,7 +620,7 @@
                 </p>
                 <p>
                   <span>Empleado responsable</span>
-                  <strong>Administrador · Sesión demo</strong>
+                  <strong>{{ auth.displayName() || 'Usuario' }} · {{ auth.roleLabel() }}</strong>
                 </p>
                 <p>
                   <span>Turno</span>
@@ -828,7 +823,7 @@
               <div class="data-rows">
                 <p>
                   <span>Empleado responsable</span>
-                  <strong>Administrador · Sesión demo</strong>
+                  <strong>{{ auth.displayName() || 'Usuario' }} · {{ auth.roleLabel() }}</strong>
                 </p>
                 <p>
                   <span>Turno</span>
@@ -2335,7 +2330,7 @@
               <img src="/icons/chart-no-axes-column.svg" alt="" width="16" height="16" />
             </div>
             <div class="indicator-value">{{ cellsInventory }}</div>
-            <div class="indicator-caption">Capacidad de demostración</div>
+            <div class="indicator-caption">Inventario registrado</div>
           </article>
           <article class="indicator">
             <div class="indicator-head">
@@ -2538,7 +2533,7 @@
                     </p>
                     <p class="map-detail-row">
                       <span>Empleado</span>
-                      <strong>{{ movimiento.entry_employee ?? 'Sesión demo' }}</strong>
+                      <strong>{{ movimiento.entry_employee ?? 'Sin registro' }}</strong>
                     </p>
                     <button
                       class="button button-secondary map-detail-action"
@@ -3059,10 +3054,6 @@
           </article>
         </section>
 
-        <div class="context-note">
-          <strong>! Capacidad por confirmar</strong>
-          <span>{{ demoInventoryNote }}</span>
-        </div>
       }
 
       @if (page === 'cells') {
@@ -3719,13 +3710,6 @@
         </nav>
 
         @if (configTab === 'inventory') {
-          <div class="message message--warning">
-            <p class="message-title">! Capacidad por confirmar · No hay un cupo global arbitrario</p>
-            <p class="message-body">
-              Inventario de demostración: {{ configInventoryTotals.total }} celdas; capacidad por confirmar.
-            </p>
-          </div>
-
           <div class="config-split">
             <section class="panel config-panel--narrow">
               <h2 class="config-panel-title">Estructura del parqueadero</h2>
@@ -4147,13 +4131,6 @@
           </div>
         </section>
 
-        <div class="message message--warning">
-          <p class="message-title">! Capacidad pendiente de validación</p>
-          <p class="message-body">
-            {{ demoInventoryNote }}
-          </p>
-        </div>
-
         <p class="page-footer">
           Autos Colombia · {{ activeLot?.name ?? parkingName }} · Datos ficticios de demostración · Solo mensualidades · COP
         </p>
@@ -4404,7 +4381,7 @@
                     @for (item of activity; track item.id) {
                       <tr>
                         <td>{{ item.occurred_at | date: 'd MMM · HH:mm' : '' : 'es-CO' }}</td>
-                        <td>{{ item.employee ?? 'Sesión demo' }}</td>
+                        <td>{{ item.employee ?? 'Sin registro' }}</td>
                         <td class="table-link-cell">{{ item.operation }}</td>
                       </tr>
                     } @empty {
@@ -4475,7 +4452,7 @@
                 @for (item of activity; track item.id) {
                   <tr>
                     <td>{{ item.occurred_at | date: 'd MMM · HH:mm' : '' : 'es-CO' }}</td>
-                    <td>{{ item.employee ?? 'Sesión demo' }}</td>
+                    <td>{{ item.employee ?? 'Sin registro' }}</td>
                     <td>{{ item.operation }}</td>
                   </tr>
                 } @empty {
@@ -5936,7 +5913,7 @@
                         <span class="cell-sub">{{ movement.zone_name }}</span>
                       </td>
                       <td>
-                        {{ movement.entry_employee ?? 'Sesión demo' }}
+                        {{ movement.entry_employee ?? 'Sin registro' }}
                         @if (movement.exit_employee) {
                           <span class="cell-sub">Salida · {{ movement.exit_employee }}</span>
                         }
@@ -5999,14 +5976,6 @@
               </div>
             </div>
           </section>
-
-          <div class="message message--warning">
-            <p class="message-title">! Inventario de demostración</p>
-            <p class="message-body">
-              Inventario de demostración: 70 carros/camionetas + 10 motos = 80 celdas; capacidad por
-              confirmar.
-            </p>
-          </div>
 
           <p class="page-footer-note">
             Las acciones de exportar se muestran como parte de la interfaz estática; no generan

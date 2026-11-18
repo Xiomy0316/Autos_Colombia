@@ -750,17 +750,7 @@ export class App implements OnInit {
   /** Responsable del movimiento: quien registró el ingreso o la salida. */
   movementOwner(movement: Movement): string {
     const nombre = movement.exited_at ? movement.exit_employee : movement.entry_employee;
-    return nombre ?? 'Sesión demo';
-  }
-
-  /** Aviso honesto sobre el inventario de demostración. */
-  get demoInventoryNote(): string {
-    const grupos = this.dashboard?.occupancy_by_group ?? {};
-    const vehiculos = grupos['vehiculos']?.total ?? 0;
-    const motos = grupos['motos']?.total ?? 0;
-    return `Inventario de demostración: ${vehiculos} carros/camionetas + ${motos} motos = ${
-      vehiculos + motos
-    } celdas; capacidad por confirmar.`;
+    return nombre ?? 'Sin registro';
   }
 
   /* ------------------------------------------------------------------ */

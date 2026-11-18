@@ -84,6 +84,11 @@ ACTIVITY_LABELS: dict[str, str] = {
     "CELL_STATUS_CHANGED": "Cambio de estado de celda",
     "EMPLOYEE_CREATED": "Creación de empleado",
     "EMPLOYEE_UPDATED": "Edición de empleado",
+    "MOVEMENT_ENTRY": "Entrada registrada",
+    "MOVEMENT_EXIT": "Salida registrada",
+    "PAYMENT_RECORDED": "Pago registrado",
+    "NOVELTY_RECORDED": "Novedad registrada",
+    "INVENTORY_CONFIGURED": "Inventario de celdas configurado",
 }
 
 PAGE_PERMISSIONS: dict[str, str] = {

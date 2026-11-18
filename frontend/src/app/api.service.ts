@@ -34,7 +34,7 @@ export interface CellStatusEvent {
   id: number; cell_id: number; from_status: string; to_status: string;
   reason: string; actor: string; created_at: string;
 }
-export interface Movement { id: number; vehicle_id: number; plate: string; brand: string; color: string; type_name: string; customer_name: string; cell_id: number; cell_code: string; zone_name?: string; site_name?: string; entered_at: string; exited_at: string | null; entry_employee: string | null; exit_employee: string | null; }
+export interface Movement { id: number; vehicle_id: number; plate: string; brand: string; color: string; type_name: string; customer_name: string; cell_id: number; cell_code: string; zone_name?: string; site_name?: string; entered_at: string; exited_at: string | null; entry_employee_id: number | null; exit_employee_id: number | null; entry_employee: string | null; exit_employee: string | null; }
 export interface OccupancyGroup { total: number; occupied: number; maintenance: number; available: number; }
 export interface Dashboard {
   parking_lot_id: number; customers_registered: number; vehicles_registered: number; vehicles_inside: number;
@@ -78,7 +78,7 @@ export interface ReportInventoryRow {
 }
 export interface ReportMovement {
   id: number; plate: string; type_name: string; entered_at: string; exited_at: string | null;
-  cell_code: string; zone_name: string; entry_employee: string | null; exit_employee: string | null;
+  cell_code: string; zone_name: string; entry_employee_id: number | null; exit_employee_id: number | null; entry_employee: string | null; exit_employee: string | null;
   state: 'ACTIVO' | 'CERRADO';
 }
 /** Catálogo de roles servido por la API con los permisos que esta sí aplica. */
