@@ -1,8 +1,8 @@
-"""Pruebas de autenticación, RBAC y bitácora del módulo Administración · Usuarios.
+"""Pruebas de autenticaciÃ³n, RBAC y bitÃ¡cora del mÃ³dulo AdministraciÃ³n Â· Usuarios.
 
-Cubre: catálogo canónico de roles, hash de contraseñas, cambio obligatorio en el
-primer inicio de sesión, 401/403 reales en FastAPI, aislamiento por parqueadero,
-sesión persistente y cuentas desactivadas.
+Cubre: catÃ¡logo canÃ³nico de roles, hash de contraseÃ±as, cambio obligatorio en el
+primer inicio de sesiÃ³n, 401/403 reales en FastAPI, aislamiento por parqueadero,
+sesiÃ³n persistente y cuentas desactivadas.
 """
 
 from sqlalchemy import select, text
@@ -50,24 +50,56 @@ def auth_client(anon_client, username, password):
 
 
 def test_role_catalog_is_canonical_and_has_only_two_roles(client):
-    """Solo ADMINISTRADOR y EMPLEADO, con permisos distintos y sin duplicados."""
+    """Verifica los roles ADMINISTRADOR y EMPLEADO y sus permisos."""
+
     response = client.get("/api/roles")
     assert response.status_code == 200
+
     codes = [role["code"] for role in response.json()]
     assert codes == [ROLE_ADMIN, ROLE_EMPLOYEE], codes
-    admin = next(role for role in response.json() if role["code"] == ROLE_ADMIN)
-    employee = next(role for role in response.json() if role["code"] == ROLE_EMPLOYEE)
-    for permission in ("OPERATE", "VIEW_AVAILABILITY", "MANAGE_ACCOUNTS", "MANAGE_STRUCTURE",
-                       "MANAGE_CELLS", "VIEW_ACTIVITY", "VIEW_HISTORY"):
+
+    admin = next(
+        role for role in response.json()
+        if role["code"] == ROLE_ADMIN
+    )
+
+    employee = next(
+        role for role in response.json()
+        if role["code"] == ROLE_EMPLOYEE
+    )
+
+    # El administrador tiene todos los permisos.
+    for permission in (
+        "OPERATE",
+        "VIEW_AVAILABILITY",
+        "MANAGE_ACCOUNTS",
+        "MANAGE_STRUCTURE",
+        "MANAGE_CELLS",
+        "VIEW_ACTIVITY",
+        "VIEW_HISTORY",
+    ):
         assert permission in admin["permissions"]
-    for permission in ("MANAGE_ACCOUNTS", "MANAGE_STRUCTURE", "VIEW_ACTIVITY", "VIEW_HISTORY"):
+
+    # El empleado NO tiene permisos administrativos.
+    for permission in (
+        "MANAGE_ACCOUNTS",
+        "MANAGE_STRUCTURE",
+        "MANAGE_CELLS",
+        "VIEW_ACTIVITY",
+        "VIEW_HISTORY",
+    ):
         assert permission not in employee["permissions"]
-    for permission in ("OPERATE", "VIEW_AVAILABILITY", "MANAGE_CELLS"):
+
+    # El empleado puede operar y consultar disponibilidad.
+    for permission in (
+        "OPERATE",
+        "VIEW_AVAILABILITY",
+    ):
         assert permission in employee["permissions"]
 
 
 def test_create_user_hashes_password_and_forces_change(client):
-    """La contraseña nunca se guarda en texto plano y el alta exige cambio."""
+    """La contraseÃ±a nunca se guarda en texto plano y el alta exige cambio."""
     employee = create_employee(client, "camila.torres", "Camila Torres")
     response = create_user(client, employee["id"], "camila.torres")
     assert response.status_code == 201, response.text
@@ -87,7 +119,7 @@ def test_create_user_hashes_password_and_forces_change(client):
 
 
 def test_admin_can_manage_accounts_and_records_activity(client):
-    employee = create_employee(client, "diego.ramirez", "Diego Ramírez")
+    employee = create_employee(client, "diego.ramirez", "Diego RamÃ­rez")
     user = create_user(client, employee["id"], "diego.ramirez", roles=(ROLE_ADMIN,))
     assert user.status_code == 201, user.text
     user_id = user.json()["id"]
@@ -112,8 +144,8 @@ def test_admin_can_manage_accounts_and_records_activity(client):
     assert all(item["actor"] == "Administrador de prueba" for item in activity)
 
 
-def test_employee_is_denied_admin_endpoints_but_can_operate_and_manage_cells(employee_client):
-    """EMPLEADO opera y gestiona celdas; el resto de administración devuelve 403."""
+def test_employee_is_denied_admin_endpoints_but_can_operate(employee_client):
+    """El empleado puede operar y consultar, pero no administrar celdas."""
     forbidden = [
         ("get", "/api/users", None),
         ("get", "/api/roles", None),
@@ -133,13 +165,45 @@ def test_employee_is_denied_admin_endpoints_but_can_operate_and_manage_cells(emp
                  "/api/movements", "/api/novelties", "/api/activity"):
         response = employee_client.get(path)
         assert response.status_code == 200, f"{path}: {response.status_code} {response.text}"
-
+    # Verificar que el empleado NO pueda crear celdas.
     cell = employee_client.post("/api/cells", json={
-        "zone_id": 1, "code": "EMP-01", "compatible_type_ids": [1],
+        "zone_id": 1,
+        "code": "EMP-01",
+        "compatible_type_ids": [1],
     })
-    assert cell.status_code == 201, cell.text
-    edited = employee_client.patch(f"/api/cells/{cell.json()['id']}", json={"code": "EMP-01-R"})
-    assert edited.status_code == 200, edited.text
+    assert cell.status_code == 403, cell.text
+
+    # El empleado SÃ puede consultar las celdas.
+    cells = employee_client.get("/api/cells")
+    assert cells.status_code == 200, cells.text
+    assert len(cells.json()) > 0
+
+    cell_id = cells.json()[0]["id"]
+
+    # Verificar que el empleado NO pueda modificar celdas.
+    edited = employee_client.patch(
+        f"/api/cells/{cell_id}",
+        json={"code": "EMP-01-R"}
+    )
+    assert edited.status_code == 403, edited.text
+
+    # Verificar que el empleado NO pueda eliminar celdas.
+    deleted = employee_client.delete(
+        f"/api/cells/{cell_id}"
+    )
+    assert deleted.status_code == 403, deleted.text
+
+    # El empleado SÃ puede registrar clientes.
+    customer = employee_client.post("/api/customers", json={
+        "parking_lot_id": 1,
+        "document_type": "CC",
+        "document_number": "TEST-EMP-95001",
+        "full_name": "Cliente operativo",
+        "phone": "",
+        "email": "",
+    })
+    assert customer.status_code == 201, customer.text
+
 
     customer = employee_client.post("/api/customers", json={
         "parking_lot_id": 1, "document_type": "CC", "document_number": "EMP-001",
@@ -171,7 +235,7 @@ def test_inactive_account_cannot_login(anon_client, client):
 
 
 def test_first_login_requires_password_change(anon_client, client):
-    """El token se expide, pero bloquea la API hasta cambiar la contraseña temporal."""
+    """El token se expide, pero bloquea la API hasta cambiar la contraseÃ±a temporal."""
     employee = create_employee(client, "cambio.prueba", "Cambio Temporal", "CAMB-1")
     assert create_user(client, employee["id"], "cambio.prueba").status_code == 201
 
@@ -242,7 +306,7 @@ def test_laura_admin_oscar_employee_and_inactive_account(initial_accounts):
     anon = initial_accounts["anon"]
 
     laura_me = laura.get("/api/auth/me").json()
-    assert laura_me["display_name"] == "Laura Martínez"
+    assert laura_me["display_name"] == "Laura Mart\u00ednez"
     assert laura_me["role_codes"] == [ROLE_ADMIN]
     assert "MANAGE_ACCOUNTS" in laura_me["permissions"]
     assert laura.get("/api/users").status_code == 200
@@ -252,16 +316,19 @@ def test_laura_admin_oscar_employee_and_inactive_account(initial_accounts):
     oscar_me = oscar.get("/api/auth/me").json()
     assert oscar_me["display_name"] == "Oscar Valencia"
     assert oscar_me["role_codes"] == [ROLE_EMPLOYEE]
-    assert oscar_me["permissions"] == ["MANAGE_CELLS", "OPERATE", "VIEW_AVAILABILITY"]
+    assert oscar_me["permissions"] == ["OPERATE", "VIEW_AVAILABILITY"]
     assert oscar.get("/api/cells").status_code == 200
     assert oscar.get("/api/customers").status_code == 200
     assert oscar.get("/api/users").status_code == 403
     assert oscar.get("/api/roles").status_code == 403
     assert oscar.get("/api/parking-lots").status_code == 200
     assert oscar.post("/api/parking-lots", json={"name": "No permitido"}).status_code == 403
+    # El empleado no puede crear celdas.
     assert oscar.post("/api/cells", json={
-        "zone_id": 1, "code": "OSCAR-01", "compatible_type_ids": [1],
-    }).status_code == 201
+    "zone_id": 1,
+    "code": "OSCAR-01",
+    "compatible_type_ids": [1],
+    }).status_code == 403
 
     deactivated = laura.patch(f"/api/users/{initial_accounts['oscar_id']}/status", json={"active": False})
     assert deactivated.status_code == 200, deactivated.text
@@ -271,8 +338,63 @@ def test_laura_admin_oscar_employee_and_inactive_account(initial_accounts):
     })
     assert blocked.status_code == 403
     assert "desactivada" in blocked.json()["detail"].lower()
-    # Laura sigue operando con su sesión intacta.
+    # Laura sigue operando con su sesiÃ³n intacta.
     assert laura.get("/api/dashboard").status_code == 200
     assert anon.post("/api/auth/login", json={
         "username": "laura.martinez", "password": LAURA_PASSWORD,
     }).status_code == 200
+
+
+
+
+def test_payments_permissions_for_employee_and_anonymous(employee_client):
+    """Verifica el acceso a pagos con y sin autenticacion."""
+
+    # Guardamos la sesion del empleado.
+    token = employee_client.headers.get("Authorization")
+    assert token, "El empleado debe tener una sesion activa"
+
+    # Simulamos un usuario sin iniciar sesion.
+    try:
+        del employee_client.headers["Authorization"]
+
+        response = employee_client.get("/api/payments")
+        assert response.status_code == 401, response.text
+
+        response = employee_client.post("/api/payments", json={
+            "vehicle_id": 999999,
+            "months": 1,
+            "method": "CASH",
+        })
+        assert response.status_code == 401, response.text
+
+    finally:
+        # Recuperamos la sesion original del empleado.
+        employee_client.headers["Authorization"] = token
+
+    # El empleado autorizado puede consultar pagos.
+    response = employee_client.get("/api/payments")
+    assert response.status_code == 200, response.text
+
+    # El empleado puede acceder al registro de pagos,
+    # pero no pagar un vehiculo inexistente.
+    response = employee_client.post("/api/payments", json={
+        "vehicle_id": 999999,
+        "months": 1,
+        "method": "CASH",
+    })
+    assert response.status_code == 404, response.text
+
+
+    # Un empleado autorizado puede consultar los pagos.
+    response = employee_client.get("/api/payments")
+    assert response.status_code == 200, response.text
+
+    # El empleado tiene permiso para registrar pagos,
+    # pero el sistema rechaza un vehiculo inexistente.
+    response = employee_client.post("/api/payments", json={
+        "vehicle_id": 999999,
+        "months": 1,
+        "method": "CASH",
+    })
+    assert response.status_code == 404, response.text

@@ -2189,8 +2189,60 @@
                             type="button"
                             (click)="$event.stopPropagation(); editCellFromInventory(celda)"
                           >
-                            Editar →
+                            Editar &rarr;
                           </button>
+
+                          <button
+                            class="link-button"
+                            type="button"
+                            [disabled]="busy || cellStatus(celda) !== 'free'"
+                            (click)="$event.stopPropagation(); openCellDelete(celda)"
+                          >
+                            Eliminar
+                          </button>
+
+                          @if (cellDeleteConfirmOpen && cellDeleteCell?.id === celda.id) {
+                            <div
+                              class="reg-note reg-note--danger"
+                              (click)="$event.stopPropagation()"
+                            >
+                              <strong>
+                                &iquest;Eliminar la celda {{ celda.code }}?
+                              </strong>
+
+                              <span>
+                                Esta acci&oacute;n no se puede deshacer.
+                                Las celdas con movimientos o historial de cambios
+                                de estado no pueden eliminarse.
+                              </span>
+
+                              @if (cellDeleteError) {
+                                <span class="field-hint field-hint--error">
+                                  {{ cellDeleteError }}
+                                </span>
+                              }
+
+                              <div class="reg-actions">
+                                <button
+                                  class="button button-secondary"
+                                  type="button"
+                                  [disabled]="busy"
+                                  (click)="$event.stopPropagation(); cancelCellDelete()"
+                                >
+                                  Cancelar
+                                </button>
+
+                                <button
+                                  class="button button-primary"
+                                  type="button"
+                                  [disabled]="busy"
+                                  (click)="$event.stopPropagation(); confirmCellDelete()"
+                                >
+                                  S&iacute;, eliminar celda
+                                </button>
+                              </div>
+                            </div>
+                          }
                         }
                       </td>
                     </tr>

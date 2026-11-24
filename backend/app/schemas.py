@@ -55,11 +55,20 @@ class SiteCreate(BaseModel):
     address: str = ""
 
 
+class SiteUpdate(BaseModel):
+    name: str | None = None
+    address: str | None = None
+
+
 class ZoneCreate(BaseModel):
     site_id: int
     name: str
     code: str = ""
 
+
+class ZoneUpdate(BaseModel):
+    name: str | None = None
+    code: str | None = None
 
 class EntryCreate(BaseModel):
     vehicle_id: int
@@ -67,12 +76,16 @@ class EntryCreate(BaseModel):
     notes: str = ""
 
 
+
 class PaymentCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     vehicle_id: int
     months: int = Field(default=1, ge=1, le=24)
     method: str = "CASH"
     paid_at: datetime | None = None
     notes: str = ""
+
 
 
 class NoveltyCreate(BaseModel):

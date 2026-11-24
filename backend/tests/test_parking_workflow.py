@@ -208,3 +208,145 @@ def test_duplicate_plate_and_cell_maintenance_rules(client):
     assert updated.status_code == 200
     assert updated.json()["operational_status"] == "MAINTENANCE"
     assert client.get("/api/dashboard").json()["cells_total"] == 11
+
+
+
+def test_cannot_delete_cell_with_active_or_historical_movements(client):
+    """Una celda con movimientos activos o históricos no se puede eliminar."""
+
+    # Crear cliente y vehículo de prueba
+    customer = create_customer(client)
+    vehicle = create_vehicle(client, customer["id"])
+
+    # Registrar la mensualidad
+    register_month(client, vehicle["id"])
+
+    # Seleccionar una celda existente
+    cells = client.get("/api/cells").json()
+    cell = next(item for item in cells if item["code"] == "C-01")
+    cell_id = cell["id"]
+
+    # Registrar la entrada del vehículo
+    entry = client.post("/api/movements/entry", json={
+        "vehicle_id": vehicle["id"],
+        "cell_id": cell_id,
+    })
+    assert entry.status_code == 201, entry.text
+
+    # Intentar eliminar la celda mientras está ocupada
+    blocked_active = client.delete(f"/api/cells/{cell_id}")
+    assert blocked_active.status_code == 409
+    assert "movimiento activo" in blocked_active.json()["detail"]
+
+    # Registrar la salida del vehículo
+    exit_response = client.post(
+        f"/api/movements/{entry.json()['id']}/exit",
+        json={},
+    )
+    assert exit_response.status_code == 200, exit_response.text
+
+    # Intentar eliminar la celda después de la salida
+    blocked_history = client.delete(f"/api/cells/{cell_id}")
+    assert blocked_history.status_code == 409
+    assert "historial" in blocked_history.json()["detail"]
+
+    # Comprobar que la celda sigue existiendo
+    remaining_cells = client.get("/api/cells")
+    assert remaining_cells.status_code == 200
+    assert any(
+        item["id"] == cell_id
+        for item in remaining_cells.json()
+    )
+
+
+
+def test_payment_rejects_invalid_month_quantities(client):
+    customer = create_customer(client)
+    vehicle = create_vehicle(client, customer["id"])
+
+    for months in [0, -1, 25]:
+        response = client.post("/api/payments", json={
+            "vehicle_id": vehicle["id"],
+            "months": months,
+            "method": "CASH",
+        })
+
+        assert response.status_code == 422, response.text
+
+
+def test_payment_calculates_full_amount(client):
+    customer = create_customer(client)
+    vehicle = create_vehicle(client, customer["id"])
+
+    response = client.post("/api/payments", json={
+        "vehicle_id": vehicle["id"],
+        "months": 2,
+        "method": "CASH",
+    })
+
+    assert response.status_code == 201, response.text
+    assert response.json()["amount"] == 500000
+
+
+def test_payment_rejects_nonexistent_vehicle(client):
+    response = client.post("/api/payments", json={
+        "vehicle_id": 999999,
+        "months": 1,
+        "method": "CASH",
+    })
+
+    assert response.status_code == 404, response.text
+
+
+def test_payment_appears_in_history(client):
+    customer = create_customer(client)
+    vehicle = create_vehicle(client, customer["id"])
+
+    response = client.post("/api/payments", json={
+        "vehicle_id": vehicle["id"],
+        "months": 1,
+        "method": "CASH",
+    })
+
+    assert response.status_code == 201, response.text
+
+    payment_id = response.json()["id"]
+    history = client.get("/api/payments")
+
+    assert history.status_code == 200, history.text
+    assert any(
+        payment["id"] == payment_id
+        for payment in history.json()
+    )
+
+
+
+def test_payment_cannot_be_reduced_with_partial_amount(client):
+    """Un usuario no puede imponer un abono inferior a la tarifa."""
+    customer = create_customer(client)
+    vehicle = create_vehicle(client, customer["id"])
+
+    response = client.post("/api/payments", json={
+        "vehicle_id": vehicle["id"],
+        "months": 1,
+        "method": "CASH",
+        "amount": 50000
+    })
+
+    assert response.status_code == 422, response.text
+    assert client.get("/api/payments").json() == []
+
+
+def test_consecutive_monthly_payments_do_not_overlap(client):
+    """Una nueva mensualidad inicia después de la anterior."""
+    customer = create_customer(client)
+    vehicle = create_vehicle(client, customer["id"])
+
+    first = register_month(client, vehicle["id"])
+    second = register_month(client, vehicle["id"])
+
+    first_end = datetime.fromisoformat(first["period_end"]).date()
+    second_start = datetime.fromisoformat(second["period_start"]).date()
+
+    assert second_start == first_end + timedelta(days=1)
+    assert second["period_start"] > first["period_start"]
