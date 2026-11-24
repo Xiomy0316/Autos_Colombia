@@ -27,9 +27,9 @@ from .models import (
 from .schemas import (
     CellCreate, CellStatusUpdate, CellUpdate, CustomerCreate, EmployeeCreate,
     EmployeeUpdate, EntryCreate, NoveltyCreate, ParkingLotCreate, ParkingLotUpdate,
-    PaymentCreate, RoleOut, ShiftCreate, ShiftUpdate, SiteCreate, TariffCreate,
+    PaymentCreate, RoleOut, ShiftCreate, ShiftUpdate, SiteCreate,SiteUpdate, TariffCreate,
     UserAccessCheck, UserCreate, UserStatusUpdate, UserUpdate, VehicleCreate,
-    ZoneCreate,
+    ZoneCreate,ZoneUpdate,
 )
 from .rbac import (
     ACTIVITY_LABELS, PERMISSION_FUNCTIONS, ROLE_ADMIN, ROLE_CATALOG,
@@ -783,6 +783,56 @@ def create_site(payload: SiteCreate, db: Session = Depends(get_db)) -> dict[str,
     return {"id": site.id, "name": site.name, "address": site.address}
 
 
+
+@app.patch("/api/sites/{site_id}", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
+def update_site(
+    site_id: int,
+    payload: SiteUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    site = db.get(Site, site_id)
+
+    if site is None:
+        raise HTTPException(404, "Sede no encontrada")
+
+    resolve_parking_lot(db, site.parking_lot_id)
+
+    if payload.name is not None:
+        name = payload.name.strip()
+
+        if not name:
+            raise HTTPException(422, "El nombre de la sede es obligatorio")
+
+        duplicate = db.scalar(
+            select(Site.id).where(
+                Site.parking_lot_id == site.parking_lot_id,
+                Site.id != site_id,
+                func.lower(func.trim(Site.name)) == name.lower(),
+            )
+        )
+
+        if duplicate is not None:
+            raise HTTPException(
+                409,
+                f"Ya existe una sede llamada '{name}' en este parqueadero.",
+            )
+
+        site.name = name
+
+    if payload.address is not None:
+        site.address = payload.address.strip()
+
+    audit_admin(db, "SITE_UPDATED", site.name)
+    db.commit()
+    db.refresh(site)
+
+    return {
+        "id": site.id,
+        "name": site.name,
+        "address": site.address,
+    }
+
+
 @app.get("/api/zones", dependencies=[Depends(permit("OPERATE"))])
 def list_zones(site_id: int | None = None, parking_lot_id: int | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     lot_id = resolve_parking_lot(db, parking_lot_id)
@@ -820,6 +870,62 @@ def create_zone(payload: ZoneCreate, parking_lot_id: int | None = None, db: Sess
     db.commit()
     db.refresh(zone)
     return {"id": zone.id, "site_id": zone.site_id, "name": zone.name, "code": zone.code}
+
+
+
+@app.patch("/api/zones/{zone_id}", dependencies=[Depends(permit("MANAGE_STRUCTURE"))])
+def update_zone(
+    zone_id: int,
+    payload: ZoneUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    zone = db.get(Zone, zone_id)
+
+    if zone is None:
+        raise HTTPException(404, "Zona no encontrada")
+
+    site = db.get(Site, zone.site_id)
+
+    if site is None:
+        raise HTTPException(404, "Sede no encontrada")
+
+    resolve_parking_lot(db, site.parking_lot_id)
+
+    if payload.name is not None:
+        name = payload.name.strip()
+
+        if not name:
+            raise HTTPException(422, "El nombre de la zona es obligatorio")
+
+        duplicate = db.scalar(
+            select(Zone.id).where(
+                Zone.site_id == zone.site_id,
+                Zone.id != zone_id,
+                func.lower(func.trim(Zone.name)) == name.lower(),
+            )
+        )
+
+        if duplicate is not None:
+            raise HTTPException(
+                409,
+                f"Ya existe una zona llamada '{name}' en esta sede.",
+            )
+
+        zone.name = name
+
+    if payload.code is not None:
+        zone.code = payload.code.strip().upper()
+
+    audit_admin(db, "ZONE_UPDATED", zone.name)
+    db.commit()
+    db.refresh(zone)
+
+    return {
+        "id": zone.id,
+        "site_id": zone.site_id,
+        "name": zone.name,
+        "code": zone.code,
+    }
 
 
 def cell_payload(
